@@ -1,3 +1,93 @@
-# baseball-pitching-scout
+# baseball-pitching-scout (PitchScout)
 
-Computer vision + ML pitch prediction and pitcher scouting.
+Can computer vision steal a pitcher's signs? This is a per-pitcher scouting tool, with a first case study on **Mason Miller's reported glove tell**. Type in a pitcher, and it builds a report with:
+
+1. **Tendencies:** pitch mix overall, by count, by batter side, and what follows each pitch.
+2. **Stats model (supervised):** LightGBM on the game situation known before the pitch.
+3. **Vision layer (supervised):** MediaPipe Pose keypoints of the pitcher from the Baseball Savant clip, **cut off before release**, combined with the stats model.
+4. **Vision layer (unsupervised):** PCA plus a Gaussian mixture that clusters deliveries without labels, then gets checked against the real pitch types.
+5. **What the vision model is looking at:** body-part × time-before-release heatmaps (TreeSHAP contributions), tells by pitch type, skeleton overlays on example clips, a 2D map of deliveries, and the average skeleton per cluster.
+
+## Notebooks
+
+| Notebook | What it covers |
+|---|---|
+| `notebooks/01_data_and_tendencies.ipynb` | Statcast pull, pitch mix by count / batter side / previous pitch, mix over time |
+| `notebooks/02_stats_model.ipynb` | Supervised stats baseline on held-out games, feature importance, calibration |
+| `notebooks/03_pose_extraction.ipynb` | Savant clips, MediaPipe pose, release detection, pre-release window, overlays |
+| `notebooks/04_supervised_vs_unsupervised.ipynb` | Head-to-head on the same clips and folds, cluster alignment, attention heatmaps |
+| `notebooks/05_mason_miller_glove_tell.ipynb` | The glove tell hypothesis test: supervised AUC + permutation p-value, unsupervised ARI/NMI, body-only control, set vs windup, by season |
+
+```bash
+pip install -r requirements.txt
+jupyter lab notebooks/
+```
+
+Every notebook reads `Config(pitcher="Mason Miller", ...)` in its first cell. Set `PITCHSCOUT_DEMO=1` to run the notebooks offline on synthetic data. Demo mode only checks that the code runs; its numbers describe no real pitcher.
+
+## Glove tell test
+
+`pitchscout/glove.py` uses two kinds of glove evidence, both taken only from frames before release:
+
+- **Pose:** the glove-hand wrist and MediaPipe hand points (index, pinky, thumb). From these it measures glove height, angle, spread, thumb opening, distance to the chest, and elbow flare, separately in the **set** (before leg lift) and the **windup**.
+- **Pixels:** crops around the glove, summarized with HOG plus color histograms and compressed with PCA. It also writes the mean crop per class and a difference image.
+
+Each feature set gets a game-grouped CV AUC with a label-permutation p-value (supervised) and a 2-cluster GMM scored with ARI/NMI/purity (unsupervised). Body features with the glove removed serve as the control.
+
+## Run the full report
+
+```bash
+pip install -r requirements.txt
+python scout.py "Zack Wheeler" --start 2024-03-28 --end 2025-09-28            # stats only, quick
+python scout.py "Zack Wheeler" --start 2024-03-28 --end 2025-09-28 --clips 600  # plus vision layers
+python scout.py "Mason Miller" --clips 600 --tell                                # plus the glove tell test
+```
+
+You need network access to `baseballsavant.mlb.com` (Statcast and clips). Downloads, pose output and Statcast pulls are cached in `cache/`, so re-runs are quick. Output goes to `reports/`:
+
+| File | What it is |
+|---|---|
+| `<pitcher>_report.html` | Self-contained interactive report |
+| `model_comparison.csv` | Accuracy and log loss for every model, ready for a paper table |
+| `unsupervised_alignment.json` | k, BIC curve, purity, ARI, NMI, silhouette |
+| `cluster_composition.csv` | Pitch-type share inside each cluster |
+| `vision_part_importance.csv` | Share of the vision model's attention by body part |
+| `glove_tell_test.csv`, `glove_tell_summary.json` | Glove tell test results and verdict (with `--tell`) |
+| `glove_mean_crops.png` | Mean glove crop per class and their difference |
+| `overlay_<play_id>.mp4/.png` | Skeleton overlays for the example clips |
+
+Options: `--window` (seconds before release the vision window starts, default 1.5) and `--cutoff` (seconds before release it stops, default 0.10). Raising `--cutoff` is a good ablation: tells that survive a bigger cutoff are ones a hitter could actually pick up.
+
+## How it avoids fooling itself
+
+- **No future information.** Situation features only use what is known before the pitch. Previous-pitch features stay inside the at-bat.
+- **No peeking at release.** Pose frames after `release - cutoff` are dropped. A test checks that changing post-cutoff frames doesn't change the features.
+- **No same-game leakage.** The stats model is scored on the latest 20% of games. The vision models use cross-validation grouped by game, and get out-of-fold stats probabilities as their prior.
+- **A fair supervised vs. unsupervised comparison.** Both use the same clips and the same folds. The clustering never sees labels; labels only map clusters to pitch shares on the training folds.
+
+## Layout
+
+```
+pitchscout/data.py          Statcast pull (pybaseball) + cleaning
+pitchscout/features.py      situation features, time split
+pitchscout/baseline.py      tendencies + stats model (early-stopped LightGBM)
+pitchscout/video.py         play_id lookup + Savant clip download
+pitchscout/pose.py          shot-cut detection, pitcher tracking, release detection, normalization
+pitchscout/fusion.py        supervised stats+pose model, TreeSHAP attention grids
+pitchscout/unsupervised.py  PCA + GMM clusters, alignment metrics, cluster-as-predictor
+pitchscout/glove.py          glove tell features and hypothesis test
+pitchscout/workspace.py      notebook helpers (Config, get_pitches, get_clips, demo mode)
+pitchscout/plotting.py       matplotlib helpers for the notebooks
+pitchscout/viz.py           skeleton overlays weighted by attention
+pitchscout/report.py        HTML report + templates/report.html
+pitchscout/pipeline.py      end-to-end run + paper tables
+notebooks/                   the analysis, step by step
+tests/                       runs on synthetic fixtures (no network)
+```
+
+## Known limits
+
+- **Not yet run on real data.** The Savant endpoints for play_id lookup (`/gf`) and the clip page (`/sporty-videos`) are coded from their public shape; check them on the first real run.
+- **Grip is out of reach.** Broadcast resolution can't show the grip. The vision layer sees body mechanics: hand set, glove position, tempo, arm path, and stride.
+- **Camera angle varies.** Broadcast center-field angles differ by ballpark, and normalization only partly corrects this. Add the venue as a feature, or analyze home and away games separately, if results look park-driven.
+- **Clip usage.** Clips belong to MLB. Use them for personal research only and don't redistribute them.

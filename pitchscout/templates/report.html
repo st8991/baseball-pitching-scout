@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pitch Scouting Report</title>
+<style>
+:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--mid:#f0efec;--neg:#e34948;--pos:#2a78d6;--warn-bg:#fff4d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--mid:#383835;--neg:#e66767;--pos:#3987e5;--warn-bg:#3a2f12}}
+:root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--mid:#383835;--neg:#e66767;--pos:#3987e5;--warn-bg:#3a2f12}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 64px}h1{font-size:28px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 4px}
+.sub{color:var(--ink2);margin:0 0 12px}.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin:12px 0;overflow-x:auto}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.tile .v{font-size:30px;font-weight:600}.tile .l{color:var(--ink2);font-size:13px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.banner{background:var(--warn-bg);border-radius:8px;padding:10px 14px;margin:12px 0;font-weight:500}
+svg text{fill:var(--ink2);font-size:12px}.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--ink2);margin:6px 0}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+#tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.15);display:none;z-index:9}
+select{font:inherit;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--ink)}
+img.strip{max-width:100%;border-radius:6px;display:block}table{border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}td,th{padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right}th:first-child,td:first-child{text-align:left}
+details{margin-top:8px;color:var(--ink2)}
+</style></head><body><main>
+<div id="tip"></div>
+<script id="data" type="application/json">__DATA__</script>
+<div id="app"></div>
+<script>
+const D=JSON.parse(document.getElementById('data').textContent);
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const SER=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
+const color=pt=>`var(${SER[D.classes.indexOf(pt)%8]})`;
+const name=pt=>D.pitch_names[pt]||pt;const pct=v=>(100*v).toFixed(0)+'%';
+const tip=document.getElementById('tip');
+function hover(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tip.style.left=Math.min(e.clientX+12,innerWidth-220)+'px';tip.style.top=(e.clientY+12)+'px'});el.addEventListener('mouseleave',()=>tip.style.display='none')}
+const NS='http://www.w3.org/2000/svg';function S(tag,a,p){const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);p&&p.appendChild(e);return e}
+const app=document.getElementById('app');function H(html){const d=document.createElement('div');d.innerHTML=html;while(d.firstChild)app.appendChild(d.firstChild);return app.lastElementChild}
+function legend(items){return `<div class="legend">${items.map(([l,c])=>`<span><i style="background:${c}"></i>${l}</span>`).join('')}</div>`}
+
+// Horizontal bars: rows [{label,value,color,tipHtml}]
+function hbars(parent,rows,{fmt=pct,max=null,w=480}={}){const lab=150,rh=26,h=rows.length*rh+8;const svg=S('svg',{viewBox:`0 0 ${w} ${h}`,width:'100%',style:`max-width:${w}px`},parent);
+ const m=max??Math.max(...rows.map(r=>r.value));rows.forEach((r,i)=>{const y=i*rh+4,bw=Math.max(2,(w-lab-60)*r.value/m);
+ S('text',{x:lab-8,y:y+15,'text-anchor':'end'},svg).textContent=r.label;
+ const b=S('rect',{x:lab,y:y+3,width:bw,height:rh-10,rx:4,fill:r.color||'var(--s1)'},svg);
+ S('text',{x:lab+bw+6,y:y+15},svg).textContent=fmt(r.value);
+ const hit=S('rect',{x:0,y,width:w,height:rh,fill:'transparent'},svg);hover(hit,r.tip||`${r.label}: ${fmt(r.value)}`)});}
+
+// Heatmap: rows x cols, values; seq (0..max) blue or diverging
+function heat(parent,rowL,colL,vals,{diverge=false,fmt=v=>v.toFixed(3),tipf=null,cw=56,lab=170}={}){
+ const rh=26,w=lab+colL.length*cw,h=rowL.length*rh+30;const svg=S('svg',{viewBox:`0 0 ${w} ${h}`,width:'100%',style:`max-width:${w}px`},parent);
+ const flat=vals.flat();const m=Math.max(...flat.map(Math.abs))||1;
+ const seq=['#cde2fb','#b7d3f6','#9ec5f4','#86b6ef','#6da7ec','#5598e7','#3987e5','#2a78d6','#256abf','#1c5cab','#184f95','#104281','#0d366b'];
+ colL.forEach((c,j)=>S('text',{x:lab+j*cw+cw/2,y:16,'text-anchor':'middle'},svg).textContent=c);
+ rowL.forEach((r,i)=>{S('text',{x:lab-8,y:30+i*rh+17,'text-anchor':'end'},svg).textContent=r;
+  colL.forEach((c,j)=>{const v=vals[i][j];let fill,op=1;
+   if(diverge){fill=v>=0?'var(--pos)':'var(--neg)';op=Math.abs(v)/m}else{fill=seq[Math.min(seq.length-1,Math.floor(v/m*(seq.length-1)))];}
+   S('rect',{x:lab+j*cw+1,y:30+i*rh+1,width:cw-2,height:rh-2,rx:3,fill:'var(--mid)'},svg);
+   const cell=S('rect',{x:lab+j*cw+1,y:30+i*rh+1,width:cw-2,height:rh-2,rx:3,fill,'fill-opacity':op},svg);
+   hover(cell,tipf?tipf(r,c,v,i,j):`${r} · ${c}: ${fmt(v)}`)})});}
+
+H(`<h1>${D.pitcher}</h1><p class="sub">${D.throws==='L'?'LHP':'RHP'} · ${D.start} to ${D.end} · ${D.n_pitches.toLocaleString()} pitches · ${D.classes.length} pitch types</p>`);
+if(D.synthetic)H(`<div class="banner">Test data: this report was built from synthetic fixtures to check the layout. None of these numbers describe a real pitcher.</div>`);
+
+// --- Headline tiles
+const B=D.baseline,F=D.fusion;
+let tiles=`<div class="tiles"><div class="card tile"><div class="v">${pct(B.naive_mix.accuracy)}</div><div class="l">Guessing his most-used pitch every time</div></div>
+<div class="card tile"><div class="v">${pct(B.stats_model.accuracy)}</div><div class="l">Stats model (held-out recent games)</div></div>`;
+if(F)tiles+=`<div class="card tile"><div class="v">${pct(F.stats_plus_vision.accuracy)}</div><div class="l">Stats + vision (${F.n_clips} clips, cross-validated by game)</div></div>`;
+H(tiles+'</div>');
+
+
+// --- Glove tell test
+const TT=D.tell;
+if(TT){
+H(`<h2>Glove tell test: ${name(TT.pos)} vs ${TT.neg}</h2><p class="sub">Can the glove alone, before release, tell which pitch is coming? ${TT.n} clips (${TT.n_pos} ${TT.pos}). Each model is cross-validated by game. The p-value comes from reshuffling the pitch labels ${TT.n_perm} times and asking how often chance does as well.</p>`);
+H(`<div class="card" style="border-left:4px solid var(--s1)"><b>${TT.verdict}</b></div>`);
+const tt=H(`<div class="card"><table id="ttell"></table></div>`);
+document.getElementById('ttell').innerHTML='<tr><th>Features</th><th>AUC</th><th>p-value</th><th>Chance AUC (95th pct)</th><th>Accuracy</th><th>Always guess majority</th><th>Unsup. ARI</th><th>Unsup. NMI</th><th>Unsup. purity</th></tr>'+
+ Object.entries(TT.sets).map(([k,m])=>`<tr><td>${k}</td><td>${m.auc.toFixed(3)}</td><td>${m.perm_p<0.001?'<0.001':m.perm_p.toFixed(3)}</td><td>${m.null_auc_95.toFixed(3)}</td><td>${pct(m.accuracy)}</td><td>${pct(m.majority)}</td><td>${m.ari.toFixed(3)}</td><td>${m.nmi.toFixed(3)}</td><td>${pct(m.purity)}</td></tr>`).join('');
+H(`<p class="sub">AUC 0.5 is a coin flip and 1.0 is perfect. The "Unsup." columns come from a 2-cluster model that never saw labels: ARI near 0 means its clusters ignore pitch type, and higher means it found the split on its own.</p>`);
+if(Object.keys(TT.phase_auc).length){const pc=H(`<div class="card"><p><b>When is the glove giving it away?</b> (supervised AUC, glove pose only)</p><div></div></div>`).lastElementChild;
+ hbars(pc,Object.entries(TT.phase_auc).map(([k,v])=>({label:k==='set'?'In the set (before leg lift)':'Windup (leg lift to cutoff)',value:v})),{fmt:v=>v.toFixed(3),max:1});}
+const tf=H(`<div class="card"><p><b>Biggest glove differences</b> (standardized: blue = larger on ${name(TT.pos)}, red = larger on ${TT.neg})</p><div></div></div>`).lastElementChild;
+const GL={wrist_x:'Glove side-to-side',wrist_y:'Glove height',angle:'Glove angle',spread:'Glove spread (index to pinky)',thumb_open:'Thumb opening',tilt:'Glove tilt',to_chest:'Glove distance from chest',to_throw_hand:'Glove to throwing hand',elbow_flare:'Glove elbow flare',rest_y:'Resting glove height',motion:'Glove movement'};
+const glab=k=>{const [a,ph,b]=k.split('|');return `${GL[a.replace('glove_','')]||a} · ${ph}${b!==''?' step '+(+b+1):''}`};
+const tw=520,lab=260,rh=26,svg=S('svg',{viewBox:`0 0 ${tw} ${TT.top.length*rh+8}`,width:'100%',style:`max-width:${tw}px`},tf);const mx=Math.max(...TT.top.map(t=>Math.abs(t[1])))||1;
+TT.top.forEach(([k,v],i)=>{const y=i*rh+4,mid=lab+(tw-lab)/2,bw=(tw-lab)/2*Math.abs(v)/mx;S('text',{x:lab-8,y:y+15,'text-anchor':'end'},svg).textContent=glab(k);
+ S('rect',{x:v>=0?mid:mid-bw,y:y+3,width:Math.max(2,bw),height:rh-10,rx:4,fill:v>=0?'var(--pos)':'var(--neg)'},svg);S('line',{x1:mid,x2:mid,y1:y,y2:y+rh,stroke:'var(--axis)'},svg);
+ hover(S('rect',{x:0,y,width:tw,height:rh,fill:'transparent'},svg),`${glab(k)}: ${v.toFixed(2)} SD`)});
+if(TT.panel)H(`<div class="card"><b>What the glove looks like</b><p class="sub">Average glove crop, left to right: three moments in the set, then three in the windup. Top row: ${name(TT.pos)}. Middle row: ${TT.neg}. Bottom row: where they differ (brighter means bigger difference).</p><img class="strip" src="${TT.panel}" alt="Mean glove crops by pitch class and their difference"></div>`);
+}
+
+// --- Tendencies
+H(`<h2>Pitch mix</h2><p class="sub">Share of all pitches.</p>`);
+const mixCard=H(`<div class="card"></div>`);hbars(mixCard,D.classes.map(c=>({label:name(c),value:D.mix[c]||0,color:color(c)})));
+H(`<h2>What he throws in each count</h2><p class="sub">Each row sums to 100%. Darker means he throws that pitch more in that count. Hover for the number of pitches.</p>`);
+const cc=H(`<div class="card"></div>`);
+heat(cc,D.counts,D.classes.map(name),D.counts.map(c=>D.classes.map(p=>D.by_count[c]?.[p]||0)),{fmt:pct,tipf:(r,c,v,i)=>`<b>${r}</b> count · ${c}: ${pct(v)}<br>${D.n_by_count[r]} pitches in this count`});
+H(`<h2>By batter side</h2>`);
+const hc=H(`<div class="card"></div>`);
+heat(hc,Object.keys(D.by_hand).map(s=>s==='L'?'vs LHB':'vs RHB'),D.classes.map(name),Object.keys(D.by_hand).map(s=>D.classes.map(p=>D.by_hand[s][p]||0)),{fmt:pct});
+H(`<h2>What follows each pitch (same at-bat)</h2><p class="sub">Row = previous pitch, column = next pitch.</p>`);
+const ac=H(`<div class="card"></div>`);const ar=Object.keys(D.after_prev);
+heat(ac,ar.map(name),D.classes.map(name),ar.map(r=>D.classes.map(p=>D.after_prev[r][p]||0)),{fmt:pct});
+
+// --- Models
+H(`<h2>How well each layer predicts</h2><p class="sub">Accuracy is the share of pitches where the top guess was right. Log loss rewards confident correct guesses and punishes confident wrong ones (lower is better).</p>`);
+const mc=H(`<div class="grid2"><div class="card"><b>Stats layer</b><table id="tb"></table></div>${F?'<div class="card"><b>Vision layer</b> (same clips, all four compared)<table id="tf"></table></div>':''}</div>`);
+function table(id,rows){document.getElementById(id).innerHTML='<tr><th>Model</th><th>Accuracy</th><th>Log loss</th></tr>'+rows.map(([l,m])=>`<tr><td>${l}</td><td>${pct(m.accuracy)}</td><td>${m.log_loss.toFixed(3)}</td></tr>`).join('')}
+table('tb',[['Overall mix',B.naive_mix],['Mix by count',B.count_only],['Stats model',B.stats_model]]);
+if(F)table('tf',[['Overall mix',F.naive_mix],['Stats only',F.stats_only],['Vision only',F.vision_only],['Stats + vision',F.stats_plus_vision]]);
+H(`<h2>What the stats model relies on</h2><p class="sub">Share of the model's total split gain.</p>`);
+const ic=H(`<div class="card"></div>`);hbars(ic,Object.entries(D.stats_importance).slice(0,10).map(([k,v])=>({label:D.feature_labels[k]||k,value:v})));
+
+// --- Vision
+if(F){
+H(`<h2>What the vision model is looking at</h2><p class="sub">How much each body part moved the guess, across the delivery. Columns run from ${D.window_s}s before release up to ${D.cutoff_s}s before release; frames after that are never shown to the model.</p>`);
+const pc=H(`<div class="card"></div>`);
+hbars(pc,Object.entries(D.part_importance).slice(0,12).map(([k,v])=>({label:k,value:v,color:k==='Stats prior'?'var(--muted)':'var(--s1)'})));
+H(`<p class="sub">Grey is the stats prior; blue bars are body parts the camera sees. Together they sum to 100%.</p>`);
+const tl=D.time_labels;const ag=H(`<div class="card"><b>Where and when</b> (mean absolute contribution)</div>`);
+heat(ag,D.attention.rows,tl,D.attention.values,{lab:180});
+H(`<h2>Tells by pitch type</h2><p class="sub">Blue cells push the model <i>toward</i> this pitch; red cells push away from it. Averaged over clips of that pitch.</p>`);
+const tc=H(`<div class="card"><label>Pitch type <select id="tsel">${D.classes.map(c=>`<option value="${c}">${name(c)}</option>`).join('')}</select></label><div id="tgrid"></div>${legend([['Toward this pitch','var(--pos)'],['Away from it','var(--neg)']])}</div>`);
+const drawT=()=>{const g=document.getElementById('tgrid');g.innerHTML='';const t=D.tells[document.getElementById('tsel').value];heat(g,t.rows,tl,t.values,{diverge:true,lab:180})};
+document.getElementById('tsel').onchange=drawT;drawT();
+H(`<h2>Example clips</h2><p class="sub">Frames from the model's window. Dot size and shade show how much the model relied on that joint at that moment; orange is the joint it used most in that frame.</p>`);
+D.examples.forEach(ex=>{const c=H(`<div class="card"><b>${ex.ok?'Correct':'Missed'}:</b> guessed ${name(ex.pred)}, actually ${name(ex.true)} · ${ex.situation}${ex.strip?`<img class="strip" src="${ex.strip}" alt="Pose overlay frames">`:''}<div class="grid2"><div class="pb"></div><div class="pp"></div></div></div>`);
+ const rows=D.classes.map(k=>({label:name(k),value:ex.prior[k],color:color(k)}));
+ const r2=D.classes.map(k=>({label:name(k),value:ex.proba[k],color:color(k)}));
+ const a=c.querySelector('.pb');a.innerHTML='<p class="sub">Stats only</p>';hbars(a,rows,{max:1,w:380});
+ const b=c.querySelector('.pp');b.innerHTML='<p class="sub">Stats + vision</p>';hbars(b,r2,{max:1,w:380});
+ c.insertAdjacentHTML('beforeend',`<details><summary>Biggest pushes toward ${name(ex.pred)}</summary><table>${ex.parts.map(([k,v])=>`<tr><td>${k}</td><td>${v>0?'+':''}${v.toFixed(3)}</td></tr>`).join('')}</table></details>`)});
+}else{H(`<h2>Vision layer</h2><div class="card">No clips processed yet. Run <code>scout.py</code> with <code>--clips N</code> to add the vision layer.</div>`)}
+
+// --- Unsupervised + comparison
+const U=D.unsup;
+if(U&&F){
+H(`<h2>Supervised vs unsupervised</h2><p class="sub">Same clips, same game-held-out folds. The unsupervised model groups deliveries without labels; labels are only used afterwards to say which pitches each group tends to be.</p>`);
+const cmp=H(`<div class="card"><table id="tcmp"></table></div>`);
+table('tcmp',[['Overall mix (no model)',F.naive_mix],['Stats only',F.stats_only],['Supervised: vision only',F.vision_only],['Unsupervised: clusters only',U.metrics.clusters_only],['Supervised: stats + vision',F.stats_plus_vision],['Unsupervised: stats + clusters',U.metrics.stats_plus_clusters]]);
+const A=U.alignment;
+H(`<div class="tiles"><div class="card tile"><div class="v">${U.k}</div><div class="l">Delivery clusters found (chosen by BIC)</div></div>
+<div class="card tile"><div class="v">${pct(A.purity)}</div><div class="l">Cluster purity (vs ${pct(A.majority_class_share)} if every cluster were his main pitch)</div></div>
+<div class="card tile"><div class="v">${A.adjusted_rand.toFixed(3)}</div><div class="l">Adjusted Rand index (0 = random, 1 = clusters match pitch types)</div></div>
+<div class="card tile"><div class="v">${A.normalized_mutual_info.toFixed(3)}</div><div class="l">Normalized mutual information</div></div></div>`);
+H(`<h2>Map of deliveries</h2><p class="sub">Each dot is one pitch's pre-release motion, flattened to 2D with PCA. Similar deliveries sit close together. Hover a dot for details.</p>`);
+const mc2=H(`<div class="card"><label>Color by <select id="csel"><option value="pitch">True pitch type</option><option value="cluster">Unsupervised cluster</option></select></label><div id="scat"></div><div id="sleg"></div></div>`);
+const pts=U.points;const clOrder=Object.entries(U.sizes).sort((a,b)=>b[1]-a[1]).map(e=>+e[0]);
+const clColor=c=>{const r=clOrder.indexOf(c);return r<7?`var(${SER[r]})`:'var(--muted)'};
+function drawScat(){const by=document.getElementById('csel').value,el=document.getElementById('scat');el.innerHTML='';
+ const w=640,h=400,pad=30,xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+ const svg=S('svg',{viewBox:`0 0 ${w} ${h}`,width:'100%',style:`max-width:${w}px`},el);
+ S('rect',{x:pad,y:pad/2,width:w-pad*1.5,height:h-pad*1.5,fill:'none',stroke:'var(--grid)'},svg);
+ S('text',{x:w/2,y:h-4,'text-anchor':'middle'},svg).textContent='PC 1';S('text',{x:10,y:h/2,transform:`rotate(-90 10 ${h/2})`,'text-anchor':'middle'},svg).textContent='PC 2';
+ pts.forEach(([a,b,c,t])=>{const cx=pad+(a-x0)/(x1-x0||1)*(w-pad*2),cy=h-pad-(b-y0)/(y1-y0||1)*(h-pad*2);
+  const d=S('circle',{cx,cy,r:4.5,fill:by==='pitch'?color(t):clColor(c),stroke:'var(--surface)','stroke-width':1.5,'fill-opacity':.85},svg);hover(d,`${name(t)} · cluster ${c+1}`)});
+ document.getElementById('sleg').innerHTML=by==='pitch'?legend(D.classes.map(c=>[name(c),color(c)])):legend(clOrder.slice(0,7).map(c=>[`Cluster ${c+1}`,clColor(c)]).concat(clOrder.length>7?[['Other clusters','var(--muted)']]:[]));}
+document.getElementById('csel').onchange=drawScat;drawScat();
+H(`<h2>What's inside each cluster</h2><p class="sub">Share of each pitch type within a cluster. A cluster dominated by one pitch means that delivery looks distinct before release.</p>`);
+const cc2=H(`<div class="card"></div>`);
+heat(cc2,clOrder.map(c=>`Cluster ${c+1} (n=${U.sizes[c]})`),D.classes.map(name),clOrder.map(c=>D.classes.map(p=>U.composition[c]?.[p]||0)),{fmt:pct,lab:170});
+H(`<h2>Average delivery per cluster</h2><p class="sub">Mean pitcher skeleton at four moments before the cutoff (throwing side drawn darker, lefties mirrored).</p>`);
+const sk=H(`<div class="card"><div class="grid2" id="skels"></div></div>`);
+const T=D.time_labels,shown=[0,3,5,7];
+clOrder.forEach(c=>{const P=U.mean_pose[c];const box=document.createElement('div');box.innerHTML=`<p class="sub">Cluster ${c+1} · mostly ${name(D.classes.reduce((a,b)=>(U.composition[c][a]||0)>=(U.composition[c][b]||0)?a:b))}</p>`;
+ const w=shown.length*90,svg=S('svg',{viewBox:`0 0 ${w} 120`,width:'100%',style:`max-width:${w}px`},box);
+ shown.forEach((b,k)=>{const ox=45+k*90,oy=60,sc=22;const J=P[b];
+  D.bones.forEach(([i,j])=>{const thr=D.joints[i].startsWith('r_')||D.joints[j].startsWith('r_');S('line',{x1:ox+J[i][0]*sc,y1:oy+J[i][1]*sc,x2:ox+J[j][0]*sc,y2:oy+J[j][1]*sc,stroke:thr?'var(--s1)':'var(--axis)','stroke-width':2.5,'stroke-linecap':'round'},svg)});
+  S('text',{x:ox,y:116,'text-anchor':'middle'},svg).textContent=T[b]});
+ document.getElementById('skels').appendChild(box)});
+}
+H(`<details><summary>Method notes</summary><p>${D.notes}</p></details>`);
+</script></main></body></html>
