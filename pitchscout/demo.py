@@ -76,3 +76,68 @@ def fake_crops(pitch_type: str, seed=0, n=6, size=64) -> np.ndarray:
         img = np.clip(img + rng.normal(0, 12, img.shape), 0, 255).astype(np.uint8)
         out.append(img)
     return np.stack(out)
+
+
+# The committed test sample (tests/fixtures/sample) is built from this. The id is a
+# made-up MLBAM-style number so it can never be confused with a real pitcher's rows.
+SYNTH_ID = 900001
+SYNTH_NAME = "Synthetic, Miller-shaped"
+
+
+def miller_shaped_statcast(n_games=60, seed=7) -> pd.DataFrame:
+    """Statcast-shaped rows for a hard-throwing right-handed closer: one inning per game,
+    a fastball-heavy mix with a slider and a few changeups, and a count-dependent mix so
+    the stats model has signal. Shaped like Mason Miller's public profile; NOT his data."""
+    import uuid
+    rng = np.random.default_rng(seed)
+    types = ["FF", "SL", "CH"]
+    speed = {"FF": (100.6, 1.1), "SL": (87.5, 1.4), "CH": (91.0, 1.2)}
+    spin = {"FF": (2500, 90), "SL": (2650, 110), "CH": (1800, 120)}
+    pfx = {"FF": ((-0.55, 1.45)), "SL": ((0.45, 0.15)), "CH": ((-1.10, 0.55))}
+    rows = []
+    for g in range(n_games):
+        date = pd.Timestamp("2025-04-01") + pd.Timedelta(days=4 * g)
+        game_pk = 777000 + g
+        home, away = int(rng.integers(0, 6)), int(rng.integers(0, 6))
+        for ab in range(1, int(rng.integers(3, 7)) + 1):
+            balls = strikes = 0
+            stand = rng.choice(["L", "R"])
+            on1 = rng.random() < 0.25
+            for pn in range(1, 10):
+                if balls > strikes:
+                    p = np.array([0.72, 0.20, 0.08])
+                elif strikes == 2:
+                    p = np.array([0.40, 0.48, 0.12])
+                else:
+                    p = np.array([0.58, 0.32, 0.10])
+                if stand == "L":   # a few more changeups to lefties
+                    p = p + np.array([-0.04, -0.04, 0.08])
+                pt = rng.choice(types, p=p / p.sum())
+                desc = rng.choice(["ball", "called_strike", "swinging_strike", "foul", "hit_into_play"],
+                                  p=[0.33, 0.17, 0.17, 0.18, 0.15])
+                end = desc == "hit_into_play" or (desc == "ball" and balls == 3) or \
+                    (desc in ("called_strike", "swinging_strike") and strikes == 2)
+                event = None
+                if end:
+                    event = {"hit_into_play": rng.choice(["field_out", "single", "double"], p=[.7, .22, .08]),
+                             "ball": "walk"}.get(desc, "strikeout")
+                pid = str(uuid.UUID(int=int(rng.integers(0, 2**63)) << 64 | (g * 1000 + ab * 20 + pn)))
+                rows.append(dict(
+                    game_pk=game_pk, game_date=date, game_type="R", at_bat_number=30 + ab, pitch_number=pn,
+                    pitcher=SYNTH_ID, player_name=SYNTH_NAME, pitch_type=pt,
+                    pitch_name={"FF": "4-Seam Fastball", "SL": "Slider", "CH": "Changeup"}[pt],
+                    balls=balls, strikes=strikes, stand=stand, p_throws="R", inning=9, inning_topbot="Top",
+                    outs_when_up=min(ab - 1, 2), on_1b=600000 + ab if on1 else np.nan, on_2b=np.nan,
+                    on_3b=np.nan, home_score=home + 1, away_score=away, n_thruorder_pitcher=1,
+                    release_speed=round(rng.normal(*speed[pt]), 1),
+                    release_spin_rate=float(round(rng.normal(*spin[pt]))),
+                    pfx_x=round(rng.normal(pfx[pt][0], 0.12), 2), pfx_z=round(rng.normal(pfx[pt][1], 0.12), 2),
+                    plate_x=round(rng.normal(0, 0.7), 2), plate_z=round(rng.normal(2.5, 0.7), 2),
+                    zone=int(rng.integers(1, 15)), description=desc, events=event, play_id=pid))
+                if end:
+                    break
+                if desc == "ball":
+                    balls += 1
+                elif strikes < 2 or desc != "foul":
+                    strikes += 1
+    return pd.DataFrame(rows)
