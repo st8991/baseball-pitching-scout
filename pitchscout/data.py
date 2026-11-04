@@ -1,7 +1,7 @@
-"""Statcast data access for one pitcher, cached locally.
+"""Statcast data access for one pitcher, stored in the local database (pitchscout.db).
 
 Uses pybaseball, which scrapes baseballsavant.mlb.com. The machine running this
-must be able to reach that host.
+must be able to reach that host the first time; after that, rows come from the database.
 """
 from __future__ import annotations
 
@@ -33,17 +33,31 @@ def lookup_pitcher(name: str) -> int:
     return int(hits.iloc[0]["key_mlbam"])
 
 
-def load_pitches(pitcher_id: int, start: str, end: str, refresh: bool = False) -> pd.DataFrame:
-    """All pitches thrown by `pitcher_id` between start and end (YYYY-MM-DD)."""
-    CACHE.mkdir(exist_ok=True)
-    path = CACHE / f"statcast_{pitcher_id}_{start}_{end}.parquet"
-    if path.exists() and not refresh:
-        return pd.read_parquet(path)
-    from pybaseball import statcast_pitcher
+def load_pitches(pitcher_id: int, start: str, end: str, refresh: bool = False, con=None) -> pd.DataFrame:
+    """All pitches thrown by `pitcher_id` between start and end (YYYY-MM-DD).
 
-    df = statcast_pitcher(start, end, pitcher_id)
-    df.to_parquet(path)
-    return df
+    Served from the database when a stored pull already covers the range. Older
+    `cache/statcast_*.parquet` files are imported on first use, so nothing is re-downloaded."""
+    from . import db
+
+    own = con is None
+    con = con or db.connect()
+    try:
+        if not refresh and db.has_pull(con, pitcher_id, start, end):
+            return db.read_pitches(con, pitcher_id, start, end)
+        legacy = CACHE / f"statcast_{pitcher_id}_{start}_{end}.parquet"
+        if legacy.exists() and not refresh:
+            df, source = pd.read_parquet(legacy), "legacy_parquet"
+        else:
+            from pybaseball import statcast_pitcher
+
+            df, source = statcast_pitcher(start, end, pitcher_id), "statcast"
+        db.upsert_pitches(con, df, pitcher=pitcher_id)
+        db.record_pull(con, pitcher_id, start, end, len(df), source)
+        return db.read_pitches(con, pitcher_id, start, end)
+    finally:
+        if own:
+            con.close()
 
 
 def clean(df: pd.DataFrame, min_share: float = 0.02) -> pd.DataFrame:

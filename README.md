@@ -23,7 +23,7 @@ pip install -r requirements.txt
 jupyter lab notebooks/
 ```
 
-Every notebook reads `Config(pitcher="Mason Miller", ...)` in its first cell. Set `PITCHSCOUT_DEMO=1` to run the notebooks offline on synthetic data. Demo mode only checks that the code runs; its numbers describe no real pitcher.
+Every notebook reads `Config(pitcher="Mason Miller", ...)` in its first cell. Set `PITCHSCOUT_DEMO=1` to run the notebooks offline on the committed synthetic sample (`tests/fixtures/sample`). Demo mode only checks that the code runs; its numbers describe no real pitcher.
 
 ## Glove tell test
 
@@ -43,7 +43,7 @@ python scout.py "Zack Wheeler" --start 2024-03-28 --end 2025-09-28 --clips 600  
 python scout.py "Mason Miller" --clips 600 --tell                                # plus the glove tell test
 ```
 
-You need network access to `baseballsavant.mlb.com` (Statcast and clips). Downloads, pose output and Statcast pulls are cached in `cache/`, so re-runs are quick. Output goes to `reports/`:
+You need network access to `baseballsavant.mlb.com` (Statcast and clips). Statcast pulls, pose tracks, features and model results are stored in the local database (`data/pitchscout.duckdb`, see below) and video clips in `cache/clips/`, so re-runs are quick. Output goes to `reports/`:
 
 | File | What it is |
 |---|---|
@@ -57,6 +57,37 @@ You need network access to `baseballsavant.mlb.com` (Statcast and clips). Downlo
 | `overlay_<play_id>.mp4/.png` | Skeleton overlays for the example clips |
 
 Options: `--window` (seconds before release the vision window starts, default 1.5) and `--cutoff` (seconds before release it stops, default 0.10). Raising `--cutoff` is a good ablation: tells that survive a bigger cutoff are ones a hitter could actually pick up.
+
+## Local database
+
+Everything the pipeline produces goes into one DuckDB file, `data/pitchscout.duckdb` (set `PITCHSCOUT_DB` to put it elsewhere). There's no server to run.
+
+| Table | One row per |
+|---|---|
+| `pitchers` | pitcher |
+| `statcast_pulls` | stored (pitcher, date range) pull, so a covered range is never re-downloaded |
+| `pitches` | Statcast pitch, keyed by `(game_pk, at_bat_number, pitch_number)`, with its `play_id` once known. Every Statcast column is kept. |
+| `clips` | Savant clip tried, with status (`ok`, `no_clip`, `no_pose`, `error`) |
+| `pose_tracks` / `pose_frames` | clip + window: release frame and window, then every MediaPipe landmark per frame |
+| `features` | clip + feature set (`pose`, `glove_pose`) + feature, long format |
+| `model_runs` | report or notebook run, with the git commit, config and a JSON summary (verdict, cluster alignment) |
+| `model_results` | metric per model per run (accuracy, log loss, AUC, permutation p, ARI, ...) |
+
+```bash
+python -m pitchscout.db                      # row counts and recent runs
+duckdb data/pitchscout.duckdb                # plain SQL, if you have the duckdb CLI
+```
+
+```python
+from pitchscout import db
+with db.connect() as con:
+    db.results(con)                          # latest run, one row per model
+    con.sql("SELECT pitch_type, avg(release_speed) FROM pitches GROUP BY 1").df()
+```
+
+Old `cache/statcast_*.parquet` and `cache/pose/*.npz` files are imported the first time they're needed. DuckDB allows one writer at a time, so the code opens the file only for as long as it needs it.
+
+**Tests run offline** against `tests/fixtures/sample`, a small slice of the database (pitches, pose tracks) loaded in memory. It is synthetic for now: Statcast-shaped rows for a made-up hard-throwing righty, not Mason Miller's real pitches. Once you've pulled real data, `python -m pitchscout.db make-fixture --from-db data/pitchscout.duckdb --pitcher <id>` swaps in a real sample. See `tests/fixtures/sample/README.md`.
 
 ## How it avoids fooling itself
 
@@ -76,7 +107,8 @@ pitchscout/pose.py          shot-cut detection, pitcher tracking, release detect
 pitchscout/fusion.py        supervised stats+pose model, TreeSHAP attention grids
 pitchscout/unsupervised.py  PCA + GMM clusters, alignment metrics, cluster-as-predictor
 pitchscout/glove.py          glove tell features and hypothesis test
-pitchscout/workspace.py      notebook helpers (Config, get_pitches, get_clips, demo mode)
+pitchscout/workspace.py      notebook helpers (Config, get_pitches, get_clips, save_run, demo mode)
+pitchscout/db.py             local DuckDB store: schema, read/write helpers, test sample
 pitchscout/plotting.py       matplotlib helpers for the notebooks
 pitchscout/viz.py           skeleton overlays weighted by attention
 pitchscout/report.py        HTML report + templates/report.html

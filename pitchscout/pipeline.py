@@ -7,40 +7,63 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import baseline, data, fusion, glove, pose, unsupervised, video, viz
+from . import baseline, data, db, fusion, glove, pose, unsupervised, video, viz
 
 
 def process_clips(df: pd.DataFrame, throws: str, n_clips: int, window_s: float, cutoff_s: float,
-                  log=print, glove_extra: dict | None = None) -> tuple[pd.DataFrame, dict]:
+                  log=print, glove_extra: dict | None = None, con=None) -> tuple[pd.DataFrame, dict]:
     """Download + pose-extract up to n_clips pitches. Returns pose feature rows (indexed
-    like df) and the PoseTrack per row."""
+    like df) and the PoseTrack per row. Pose tracks, clip status and features are stored
+    in the database, so re-runs skip the download and MediaPipe steps."""
+    own = con is None
+    con = con or db.connect()
+    try:
+        return _process_clips(con, df, throws, n_clips, window_s, cutoff_s, log, glove_extra)
+    finally:
+        if own:
+            con.close()
+
+
+def _process_clips(con, df, throws, n_clips, window_s, cutoff_s, log, glove_extra):
     sample = video.sample_for_video(df, n_clips)
     sample = video.attach_play_ids(sample)
+    db.set_play_ids(con, sample)
     tracks, rows = {}, {}
-    pose_dir = Path("cache/pose"); pose_dir.mkdir(parents=True, exist_ok=True)
+    legacy_dir = Path("cache/pose")
     for n, (i, r) in enumerate(sample.iterrows(), 1):
         pid = r.get("play_id")
         if not isinstance(pid, str):
             continue
-        cache = pose_dir / f"{pid}_{window_s}_{cutoff_s}.npz"
         try:
-            if cache.exists():
-                tr = pose.load(cache)
-            else:
-                clip = video.download_clip(pid)
-                tr = pose.extract(clip, throws, window_s, cutoff_s) if clip else None
-                if tr is None:
-                    continue
-                pose.save(tr, cache)
+            tr = db.load_track(con, pid, window_s, cutoff_s)
+            if tr is None:
+                legacy = legacy_dir / f"{pid}_{window_s}_{cutoff_s}.npz"
+                if legacy.exists():
+                    tr = pose.load(legacy)
+                else:
+                    clip = video.download_clip(pid)
+                    if not clip:
+                        db.record_clip(con, pid, r, status="no_clip")
+                        continue
+                    tr = pose.extract(clip, throws, window_s, cutoff_s)
+                    if tr is None:
+                        db.record_clip(con, pid, r, status="no_pose", video_path=clip)
+                        continue
+                db.save_track(con, pid, tr, window_s, cutoff_s)
+                db.record_clip(con, pid, r, status="ok", video_path=video.CLIPS / f"{pid}.mp4")
         except Exception as e:  # one bad clip shouldn't stop the run
             log(f"  skip {pid}: {e}")
+            db.record_clip(con, pid, r, status="error", error=str(e)[:500])
             continue
         f = fusion.pose_features(tr, throws)
         if f:
             tracks[i], rows[i] = (tr, pid), f
+            db.save_features(con, pid, f, "pose", window_s, cutoff_s)
             if glove_extra is not None:
                 g = glove_extra
-                g.setdefault("pose", {})[i] = glove.glove_pose_features(tr, throws)
+                gp = glove.glove_pose_features(tr, throws)
+                g.setdefault("pose", {})[i] = gp
+                db.save_features(con, pid, gp, "glove_pose", window_s, cutoff_s)
                 clip = video.CLIPS / f"{pid}.mp4"
                 if clip.exists():
                     c = glove.glove_crops(clip, tr, throws)
@@ -55,23 +78,38 @@ def process_clips(df: pd.DataFrame, throws: str, n_clips: int, window_s: float, 
 def run(pitcher: str, start: str, end: str, n_clips: int = 0, out_dir: Path = Path("reports"),
         window_s: float = 1.5, cutoff_s: float = 0.10, log=print, pitcher_id: int | None = None,
         tell: bool = False, positive: set[str] | None = None, negative: set[str] | None = None,
-        n_perm: int = 200) -> Path:
+        n_perm: int = 200, db_path: str | Path | None = None) -> Path:
+    with db.connect(db_path) as con:
+        return _run(con, pitcher, start, end, n_clips, out_dir, window_s, cutoff_s, log, pitcher_id,
+                    tell, positive, negative, n_perm)
+
+
+def _run(con, pitcher, start, end, n_clips, out_dir, window_s, cutoff_s, log, pitcher_id,
+         tell, positive, negative, n_perm) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     pid = pitcher_id or data.lookup_pitcher(pitcher)
     log(f"{pitcher}: MLBAM id {pid}")
-    df = data.clean(data.load_pitches(pid, start, end))
+    df = data.clean(data.load_pitches(pid, start, end, con=con))
     throws = df["p_throws"].mode().iloc[0]
     log(f"{len(df)} pitches, types: {df['pitch_type'].value_counts().to_dict()}")
+    run_id = db.start_run(con, "report", pid, pitcher, start, end, len(df), None, window_s, cutoff_s,
+                          params={"n_clips": n_clips, "tell": tell, "n_perm": n_perm,
+                                  "positive": sorted(positive) if positive else None,
+                                  "negative": sorted(negative) if negative else None})
+    log(f"run {run_id} -> {db.db_path()}")
 
     tend = baseline.tendencies(df)
     base = baseline.fit_baseline(df)
     log(f"stats model: {base.metrics}")
+    db.save_results(con, run_id, "stats", stats_rows(base))
 
     fus = uns = tell_res = panel = None
     strips = {}
+    n_usable = 0
     if n_clips:
         gx = {} if tell else None
-        pose_df, tracks = process_clips(df, throws, n_clips, window_s, cutoff_s, log, gx)
+        pose_df, tracks = process_clips(df, throws, n_clips, window_s, cutoff_s, log, gx, con=con)
+        n_usable = len(pose_df)
         log(f"{len(pose_df)} usable clips")
         if len(pose_df) >= 30:
             idx = pose_df.index.to_numpy()
@@ -84,6 +122,7 @@ def run(pitcher: str, start: str, end: str, n_clips: int = 0, out_dir: Path = Pa
             log(f"unsupervised: {uns.metrics} {uns.alignment}")
             strips = render_examples(fus, tracks, throws, out_dir)
             export_tables(out_dir, pitcher, base, fus, uns)
+            db.save_results(con, run_id, "clips", clip_rows(fus, uns))
             if tell:
                 pos = positive or (set(df["pitch_type"]) & glove.FASTBALLS)
                 gp = pd.DataFrame.from_dict(gx.get("pose", {}), orient="index").reindex(idx)
@@ -92,8 +131,10 @@ def run(pitcher: str, start: str, end: str, n_clips: int = 0, out_dir: Path = Pa
                                                gx.get("crops"), n_perm, data.PITCH_NAMES)
                 panel = glove.crop_panel(tell_res, out_dir / "glove_mean_crops.png")
                 export_tell(out_dir, pitcher, tell_res)
+                db.save_results(con, run_id, "glove_tell", tell_rows(tell_res))
                 log(tell_res.verdict)
 
+    db.finish_run(con, run_id, run_summary(uns, tell_res), n_clips=n_usable)
     slug = pitcher.lower().replace(" ", "_")
     out = out_dir / f"{slug}_report.html"
     from .report import build
@@ -122,22 +163,51 @@ def render_examples(fus, tracks, throws, out_dir: Path) -> dict:
     return strips
 
 
+def stats_rows(base) -> list[dict]:
+    m = base.metrics
+    return [{"dataset": "Stats", "model": name, "family": fam, "evaluation": "held-out games", **m[key]}
+            for name, fam, key in [("Overall mix", "baseline", "naive_mix"),
+                                   ("Mix by count", "baseline", "count_only"),
+                                   ("LightGBM situation model", "supervised", "stats_model")]]
+
+
+def clip_rows(fus, uns) -> list[dict]:
+    spec = [("Overall mix", "baseline", fus.metrics["naive_mix"]),
+            ("Stats only (out-of-fold)", "supervised", fus.metrics["stats_only"]),
+            ("Vision only (LightGBM on pose)", "supervised", fus.metrics["vision_only"]),
+            ("Stats + vision (LightGBM)", "supervised", fus.metrics["stats_plus_vision"]),
+            ("Clusters only (PCA + GMM)", "unsupervised", uns.metrics["clusters_only"]),
+            ("Stats + clusters", "unsupervised", uns.metrics["stats_plus_clusters"])]
+    return [{"dataset": "Clips", "model": name, "family": fam, "evaluation": "game-grouped CV", **r}
+            for name, fam, r in spec]
+
+
+def tell_rows(res) -> list[dict]:
+    rows = [{"dataset": f"{res.positive_label} vs {res.negative_label}", "model": k,
+             "family": "supervised+unsupervised", "evaluation": "game-grouped CV + permutation", **v}
+            for k, v in res.sets.items()]
+    rows += [{"dataset": f"{res.positive_label} vs {res.negative_label}", "model": f"Glove (pose), {ph} only",
+              "family": "supervised", "evaluation": "game-grouped CV", "auc": auc}
+             for ph, auc in res.phase_auc.items()]
+    return rows
+
+
+def run_summary(uns=None, tell=None) -> dict:
+    out = {}
+    if uns is not None:
+        out["unsupervised"] = {"k": uns.k, "bic": uns.bic, **uns.alignment}
+    if tell is not None:
+        out["glove_tell"] = {"verdict": tell.verdict, "n": tell.n, "n_positive": tell.n_pos,
+                             "phase_auc": tell.phase_auc, "top_glove_differences": tell.top_features}
+    return out
+
+
 def export_tables(out_dir: Path, pitcher: str, base, fus, uns) -> None:
-    """CSV/JSON a paper can cite directly."""
-    rows = [
-        ("Stats", "Overall mix", "baseline", base.metrics["naive_mix"], "held-out games"),
-        ("Stats", "Mix by count", "baseline", base.metrics["count_only"], "held-out games"),
-        ("Stats", "LightGBM situation model", "supervised", base.metrics["stats_model"], "held-out games"),
-        ("Clips", "Overall mix", "baseline", fus.metrics["naive_mix"], "game-grouped CV"),
-        ("Clips", "Stats only (out-of-fold)", "supervised", fus.metrics["stats_only"], "game-grouped CV"),
-        ("Clips", "Vision only (LightGBM on pose)", "supervised", fus.metrics["vision_only"], "game-grouped CV"),
-        ("Clips", "Stats + vision (LightGBM)", "supervised", fus.metrics["stats_plus_vision"], "game-grouped CV"),
-        ("Clips", "Clusters only (PCA + GMM)", "unsupervised", uns.metrics["clusters_only"], "game-grouped CV"),
-        ("Clips", "Stats + clusters", "unsupervised", uns.metrics["stats_plus_clusters"], "game-grouped CV"),
-    ]
-    pd.DataFrame([{"pitcher": pitcher, "dataset": d, "model": m, "family": f,
-                   "accuracy": r["accuracy"], "log_loss": r["log_loss"], "evaluation": e}
-                  for d, m, f, r, e in rows]).to_csv(out_dir / "model_comparison.csv", index=False)
+    """CSV/JSON a paper can cite directly (the same numbers go to the model_results table)."""
+    rows = stats_rows(base) + clip_rows(fus, uns)
+    pd.DataFrame([{"pitcher": pitcher, "dataset": r["dataset"], "model": r["model"], "family": r["family"],
+                   "accuracy": r["accuracy"], "log_loss": r["log_loss"], "evaluation": r["evaluation"]}
+                  for r in rows]).to_csv(out_dir / "model_comparison.csv", index=False)
     json.dump({"pitcher": pitcher, "k": uns.k, "bic": uns.bic, **uns.alignment},
               open(out_dir / "unsupervised_alignment.json", "w"), indent=2)
     uns.composition.to_csv(out_dir / "cluster_composition.csv")

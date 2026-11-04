@@ -55,8 +55,10 @@ def attach_play_ids(df: pd.DataFrame, pause: float = 0.5) -> pd.DataFrame:
         parts.append(g)
         time.sleep(pause)
     ids = pd.concat(parts, ignore_index=True).drop(columns=["pitcher"])
+    ids = ids.drop_duplicates(["game_pk", "at_bat_number", "pitch_number"])
     out = df.drop(columns=["play_id"], errors="ignore").merge(
         ids, on=["game_pk", "at_bat_number", "pitch_number"], how="left")
+    out.index = df.index   # keep the caller's row labels; merge would reset them
     return out
 
 
