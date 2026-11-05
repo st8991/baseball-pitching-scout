@@ -43,6 +43,10 @@ python scout.py "Zack Wheeler" --start 2024-03-28 --end 2025-09-28 --clips 600  
 python scout.py "Mason Miller" --clips 600 --tell                                # plus the glove tell test
 ```
 
+On a headless Linux box, MediaPipe pose needs the EGL/GLES libraries
+(`sudo apt-get install libegl1 libgles2 libgl1`); without them every clip is skipped
+with `libEGL.so.1: cannot open shared object file`.
+
 You need network access to `baseballsavant.mlb.com` (Statcast and clips). Statcast pulls, pose tracks, features and model results are stored in the local database (`data/pitchscout.duckdb`, see below) and video clips in `cache/clips/`, so re-runs are quick. Output goes to `reports/`:
 
 | File | What it is |

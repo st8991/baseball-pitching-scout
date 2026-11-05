@@ -93,7 +93,11 @@ def glove_crops(clip: Path, track: PoseTrack, throws: str, n: int = 6) -> np.nda
         p = track.frames[t]
         torso = np.linalg.norm((p[11, :2] + p[12, :2]) / 2 - (p[23, :2] + p[24, :2]) / 2) * h
         half = int(max(12, 0.45 * torso))
-        cx, cy = int(p[gw, 0] * w), int(p[gw, 1] * h)
+        if not np.isfinite(p[gw, :2]).all() or not np.isfinite(half):
+            return None
+        # landmarks can sit outside the frame; clamp so the padded crop is never empty
+        cx = int(np.clip(p[gw, 0] * w, 0, w - 1))
+        cy = int(np.clip(p[gw, 1] * h, 0, h - 1))
         pad = cv2.copyMakeBorder(frames[t], half, half, half, half, cv2.BORDER_REPLICATE)
         crop = pad[cy:cy + 2 * half, cx:cx + 2 * half]
         crop = cv2.resize(crop, (CROP, CROP))
