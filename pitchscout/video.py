@@ -9,6 +9,7 @@ modest and cached, and don't redistribute them.
 """
 from __future__ import annotations
 
+import html
 import re
 import time
 from pathlib import Path
@@ -66,7 +67,8 @@ def clip_url(play_id: str) -> str | None:
     r = requests.get(f"{SAVANT}/sporty-videos", params={"playId": play_id}, headers=HEADERS, timeout=30)
     r.raise_for_status()
     m = MP4_RE.search(r.text)
-    return m.group(0) if m else None
+    # the page HTML-escapes the URL (e.g. '=' as &#x3D;), which 404s if used verbatim
+    return html.unescape(m.group(0)) if m else None
 
 
 def download_clip(play_id: str, pause: float = 1.0) -> Path | None:
