@@ -8,6 +8,18 @@ Can computer vision steal a pitcher's signs? This is a per-pitcher scouting tool
 4. **Vision layer (unsupervised):** PCA plus a Gaussian mixture that clusters deliveries without labels, then gets checked against the real pitch types.
 5. **What the vision model is looking at:** body-part × time-before-release heatmaps (TreeSHAP contributions), tells by pitch type, skeleton overlays on example clips, a 2D map of deliveries, and the average skeleton per cluster.
 
+## Result: Mason Miller glove tell
+
+Run on real data on Nov 5, 2026: 474 usable Savant clips from 2024-25 (FF 228, SL 213, CH 33), glove features taken only from frames before release.
+
+| Comparison | Glove pose AUC | p (500 perms) | Body control AUC | Glove ARI |
+|---|---|---|---|---|
+| FF vs SL+CH | 0.599 | 0.002 | 0.531 | 0.010 |
+| FF vs SL | 0.598 | 0.004 | 0.564 | 0.006 |
+| FF vs CH | 0.413 | 0.852 | 0.364 | -0.008 |
+
+**Weak evidence of a fastball-vs-slider glove tell.** Supervised, the glove beats chance and the body-only control, but AUC 0.60 is not a usable tell. Unsupervised, the glove clusters don't line up with pitch type at all (ARI ≈ 0). There is no fastball-vs-changeup signal (only 33 changeup clips). Details, the season split and caveats are at the end of `notebooks/05_mason_miller_glove_tell.ipynb`.
+
 ## Notebooks
 
 | Notebook | What it covers |
@@ -123,7 +135,7 @@ tests/                       runs on synthetic fixtures (no network)
 
 ## Known limits
 
-- **Not yet run on real data.** The Savant endpoints for play_id lookup (`/gf`) and the clip page (`/sporty-videos`) are coded from their public shape; check them on the first real run.
+- **Network.** Clips come from `sporty-clips.mlb.com`; data from `baseballsavant.mlb.com`. Both must be reachable. Pose extraction runs at about 20 s per clip per CPU core, so 600 clips take a few hours on one core.
 - **Grip is out of reach.** Broadcast resolution can't show the grip. The vision layer sees body mechanics: hand set, glove position, tempo, arm path, and stride.
 - **Camera angle varies.** Broadcast center-field angles differ by ballpark, and normalization only partly corrects this. Add the venue as a feature, or analyze home and away games separately, if results look park-driven.
 - **Clip usage.** Clips belong to MLB. Use them for personal research only and don't redistribute them.
