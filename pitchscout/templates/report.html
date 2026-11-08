@@ -70,12 +70,13 @@ H(tiles+'</div>');
 
 // --- Glove tell test
 const TT=D.tell;
+const fx=v=>v==null||isNaN(v)?'–':v.toFixed(2), fp=v=>v==null||isNaN(v)?'–':v<0.001?'<0.001':v.toFixed(3);
 if(TT){
-H(`<h2>Glove tell test: ${name(TT.pos)} vs ${TT.neg}</h2><p class="sub">Can the glove alone, before release, tell which pitch is coming? ${TT.n} clips (${TT.n_pos} ${TT.pos}). Each model is cross-validated by game. The p-value comes from reshuffling the pitch labels ${TT.n_perm} times and asking how often chance does as well.</p>`);
+H(`<h2>Glove tell test: ${name(TT.pos)} vs ${TT.neg}</h2><p class="sub">Can the glove alone, before release, tell which pitch is coming? ${TT.n} clips (${TT.n_pos} ${TT.pos}). Each model is cross-validated by game, and the AUC range is a 95% interval from resampling whole games. The main p-value reshuffles the pitch labels inside each game ${TT.n_perm} times and asks how often chance does as well, so game-level differences (camera, park, pitch mix) cannot pass as a tell. The free-shuffle p-value mixes labels across all games and is shown for comparison: if it is much smaller than the within-game one, the signal may be a game-level artifact.</p>`);
 H(`<div class="card" style="border-left:4px solid var(--s1)"><b>${TT.verdict}</b></div>`);
 const tt=H(`<div class="card"><table id="ttell"></table></div>`);
-document.getElementById('ttell').innerHTML='<tr><th>Features</th><th>AUC</th><th>p-value</th><th>Chance AUC (95th pct)</th><th>Accuracy</th><th>Always guess majority</th><th>Unsup. ARI</th><th>Unsup. NMI</th><th>Unsup. purity</th></tr>'+
- Object.entries(TT.sets).map(([k,m])=>`<tr><td>${k}</td><td>${m.auc.toFixed(3)}</td><td>${m.perm_p<0.001?'<0.001':m.perm_p.toFixed(3)}</td><td>${m.null_auc_95.toFixed(3)}</td><td>${pct(m.accuracy)}</td><td>${pct(m.majority)}</td><td>${m.ari.toFixed(3)}</td><td>${m.nmi.toFixed(3)}</td><td>${pct(m.purity)}</td></tr>`).join('');
+document.getElementById('ttell').innerHTML='<tr><th>Features</th><th>AUC (95% CI)</th><th>p (within game)</th><th>p (free shuffle)</th><th>Chance AUC (95th pct)</th><th>Accuracy</th><th>Always guess majority</th><th>Unsup. ARI</th><th>Unsup. NMI</th><th>Unsup. purity</th></tr>'+
+ Object.entries(TT.sets).map(([k,m])=>`<tr><td>${k}</td><td>${m.auc.toFixed(3)} (${fx(m.auc_lo)}–${fx(m.auc_hi)})</td><td>${fp(m.perm_p)}</td><td>${fp(m.perm_p_free)}</td><td>${m.null_auc_95.toFixed(3)}</td><td>${pct(m.accuracy)}</td><td>${pct(m.majority)}</td><td>${m.ari.toFixed(3)}</td><td>${m.nmi.toFixed(3)}</td><td>${pct(m.purity)}</td></tr>`).join('');
 H(`<p class="sub">AUC 0.5 is a coin flip and 1.0 is perfect. The "Unsup." columns come from a 2-cluster model that never saw labels: ARI near 0 means its clusters ignore pitch type, and higher means it found the split on its own.</p>`);
 if(Object.keys(TT.phase_auc).length){const pc=H(`<div class="card"><p><b>When is the glove giving it away?</b> (supervised AUC, glove pose only)</p><div></div></div>`).lastElementChild;
  hbars(pc,Object.entries(TT.phase_auc).map(([k,v])=>({label:k==='set'?'In the set (before leg lift)':'Windup (leg lift to cutoff)',value:v})),{fmt:v=>v.toFixed(3),max:1});}

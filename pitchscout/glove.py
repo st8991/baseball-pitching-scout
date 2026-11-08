@@ -8,7 +8,9 @@ Two kinds of glove evidence, both taken only from frames before release:
     histograms, plus mean crops per class and a difference image.
 
 The test reports, for glove features vs a body-without-glove control:
-  * supervised: game-grouped CV AUC/accuracy and a label-permutation p-value
+  * supervised: game-grouped CV AUC/accuracy with a game-level bootstrap CI, and two
+    label-permutation p-values: within-game (primary; pitches are only exchangeable inside
+    a game) and a free shuffle across all pitches (kept for comparison)
   * unsupervised: k=2 Gaussian mixture on the same features, ARI / NMI / purity
 """
 from __future__ import annotations
@@ -170,27 +172,63 @@ class TellResult:
     mean_crops: dict = field(default_factory=dict)  # label -> (n, CROP, CROP, 3) uint8
 
 
+def _permute_within(yb: np.ndarray, games: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Shuffle labels only inside each game, so each game keeps its own pitch mix."""
+    out = yb.copy()
+    for g in np.unique(games):
+        i = np.flatnonzero(games == g)
+        out[i] = yb[rng.permutation(i)]
+    return out
+
+
+def _bootstrap_auc_ci(yb: np.ndarray, p: np.ndarray, games: np.ndarray, n_boot: int = 1000,
+                      seed: int = 0) -> tuple[float, float]:
+    """2.5-97.5% interval for the out-of-fold AUC, resampling whole games with replacement."""
+    uniq = np.unique(games)
+    rows = [np.flatnonzero(games == g) for g in uniq]
+    rng = np.random.default_rng(seed)
+    aucs = []
+    for _ in range(n_boot):
+        i = np.concatenate([rows[j] for j in rng.integers(0, len(uniq), len(uniq))])
+        if len(np.unique(yb[i])) == 2:
+            aucs.append(roc_auc_score(yb[i], p[i]))
+    if not aucs:
+        return float("nan"), float("nan")
+    lo, hi = np.quantile(aucs, [0.025, 0.975])
+    return float(lo), float(hi)
+
+
+def _perm_null(Xv, yb, fold, perms, seed) -> np.ndarray:
+    from joblib import Parallel, delayed
+    return np.array(Parallel(n_jobs=-1)(
+        delayed(lambda yp: roc_auc_score(yp, _cv_proba(Xv, yp, fold, seed)))(yp) for yp in perms))
+
+
 def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm: int = 200,
-                     seed: int = 0) -> dict:
+                     seed: int = 0, free_shuffle: bool = True, n_boot: int = 1000) -> dict:
+    """perm_p is the within-game permutation p-value (shuffle labels inside each game_pk).
+    perm_p_free is the old free shuffle across all pitches; set free_shuffle=False to skip it."""
     Xv = X.fillna(X.median()).to_numpy()
     fold = _folds(games)
     p = _cv_proba(Xv, yb, fold, seed)
     auc = float(roc_auc_score(yb, p))
     acc = float(((p > 0.5) == yb).mean())
-    # Permutation test: shuffle labels, keep folds, recompute AUC.
+    auc_lo, auc_hi = _bootstrap_auc_ci(yb, p, games, n_boot, seed) if n_boot else (float("nan"),) * 2
+    # Permutation tests: shuffle labels, keep folds, recompute AUC.
     rng = np.random.default_rng(seed)
-    from joblib import Parallel, delayed
-    perms = [rng.permutation(yb) for _ in range(n_perm)]
-    null = Parallel(n_jobs=-1)(delayed(lambda yp: roc_auc_score(yp, _cv_proba(Xv, yp, fold, seed)))(yp)
-                               for yp in perms)
-    pval = float((1 + np.sum(np.array(null) >= auc)) / (1 + n_perm))
+    pv = lambda null: float((1 + np.sum(null >= auc)) / (1 + n_perm)) if n_perm else float("nan")
+    null = _perm_null(Xv, yb, fold, [_permute_within(yb, games, rng) for _ in range(n_perm)], seed)
+    null_free = (_perm_null(Xv, yb, fold, [rng.permutation(yb) for _ in range(n_perm)], seed)
+                 if free_shuffle else np.array([]))
     # Unsupervised: 2-cluster GMM on standardized, PCA-reduced features, no labels.
     Z = StandardScaler().fit_transform(Xv)
     Z = PCA(min(8, Z.shape[1], len(Z) - 1), random_state=0).fit_transform(Z)
     c = GaussianMixture(2, covariance_type="full", random_state=0, n_init=5).fit_predict(Z)
     return {
-        "auc": auc, "accuracy": acc, "majority": float(max(yb.mean(), 1 - yb.mean())),
-        "perm_p": pval, "null_auc_95": float(np.quantile(null, 0.95)) if null else float("nan"),
+        "auc": auc, "auc_lo": auc_lo, "auc_hi": auc_hi,
+        "accuracy": acc, "majority": float(max(yb.mean(), 1 - yb.mean())),
+        "perm_p": pv(null), "perm_p_free": pv(null_free) if len(null_free) else float("nan"),
+        "null_auc_95": float(np.quantile(null, 0.95)) if len(null) else float("nan"),
         "ari": float(adjusted_rand_score(yb, c)), "nmi": float(normalized_mutual_info_score(yb, c)),
         "purity": _purity(yb, c), "n_features": int(X.shape[1]),
     }
@@ -229,7 +267,7 @@ def run_tell_test(glove_pose: pd.DataFrame, glove_pix: pd.DataFrame | None, body
     for ph in ("set", "windup"):
         cols = [c for c in gp.columns if f"|{ph}|" in c]
         if cols:
-            res.phase_auc[ph] = test_feature_set(gp[cols], yb, games, n_perm=0)["auc"]
+            res.phase_auc[ph] = test_feature_set(gp[cols], yb, games, n_perm=0, n_boot=0)["auc"]
     # Which glove measurements separate the classes most (standardized mean difference).
     Xs = gp.fillna(gp.median())
     d = (Xs[yb == 1].mean() - Xs[yb == 0].mean()) / (Xs.std() + 1e-9)
@@ -257,7 +295,8 @@ def verdict(res: TellResult) -> str:
     beats = best["auc"] > c.get("auc", 0) + 0.03
     if sig and beats:
         return (f"Supported: the glove alone separates {res.positive_label} from {res.negative_label} "
-                f"(AUC {best['auc']:.2f}, permutation p={best['perm_p']:.3f}), better than the body-only "
+                f"(AUC {best['auc']:.2f}, 95% CI {best.get('auc_lo', float('nan')):.2f}-{best.get('auc_hi', float('nan')):.2f}, "
+                f"within-game permutation p={best['perm_p']:.3f}), better than the body-only "
                 f"control (AUC {c.get('auc', float('nan')):.2f}).")
     if sig:
         return (f"Partly supported: the glove carries signal (AUC {best['auc']:.2f}, p={best['perm_p']:.3f}), "
