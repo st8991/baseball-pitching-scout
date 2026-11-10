@@ -11,7 +11,8 @@ The test reports, for glove features vs a body-without-glove control:
   * supervised: game-grouped CV AUC/accuracy with a game-level bootstrap CI, and two
     label-permutation p-values: within-game (primary; pitches are only exchangeable inside
     a game) and a free shuffle across all pitches (kept for comparison)
-  * unsupervised: k=2 Gaussian mixture on the same features, ARI / NMI / purity
+  * unsupervised: k=2 Gaussian mixture on the same features, ARI / NMI / purity, each with
+    a within-game permutation p-value (clusters fixed, labels shuffled; no refit)
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 from .pose import PoseTrack, normalize_all, read_frames, resample
+from .unsupervised import alignment_perm_p, permute_within as _permute_within
 
 FASTBALLS = {"FF", "SI", "FC"}
 PHASE_BINS = 4
@@ -172,15 +174,6 @@ class TellResult:
     mean_crops: dict = field(default_factory=dict)  # label -> (n, CROP, CROP, 3) uint8
 
 
-def _permute_within(yb: np.ndarray, games: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Shuffle labels only inside each game, so each game keeps its own pitch mix."""
-    out = yb.copy()
-    for g in np.unique(games):
-        i = np.flatnonzero(games == g)
-        out[i] = yb[rng.permutation(i)]
-    return out
-
-
 def _bootstrap_auc_ci(yb: np.ndarray, p: np.ndarray, games: np.ndarray, n_boot: int = 1000,
                       seed: int = 0) -> tuple[float, float]:
     """2.5-97.5% interval for the out-of-fold AUC, resampling whole games with replacement."""
@@ -224,13 +217,15 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
     Z = StandardScaler().fit_transform(Xv)
     Z = PCA(min(8, Z.shape[1], len(Z) - 1), random_state=0).fit_transform(Z)
     c = GaussianMixture(2, covariance_type="full", random_state=0, n_init=5).fit_predict(Z)
+    # Same within-game null for the label-free clusters, so both halves carry a p-value.
+    cl_p = alignment_perm_p(yb, c, games, n_perm, seed)
     return {
         "auc": auc, "auc_lo": auc_lo, "auc_hi": auc_hi,
         "accuracy": acc, "majority": float(max(yb.mean(), 1 - yb.mean())),
         "perm_p": pv(null), "perm_p_free": pv(null_free) if len(null_free) else float("nan"),
         "null_auc_95": float(np.quantile(null, 0.95)) if len(null) else float("nan"),
         "ari": float(adjusted_rand_score(yb, c)), "nmi": float(normalized_mutual_info_score(yb, c)),
-        "purity": _purity(yb, c), "n_features": int(X.shape[1]),
+        "purity": _purity(yb, c), **cl_p, "n_features": int(X.shape[1]),
     }
 
 

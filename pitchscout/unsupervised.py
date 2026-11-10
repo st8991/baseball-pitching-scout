@@ -66,9 +66,36 @@ def _purity(y, c) -> float:
     return float(ct.max(axis=1).sum() / ct.values.sum())
 
 
+def permute_within(y: np.ndarray, games: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Shuffle labels only inside each game, so each game keeps its own pitch mix."""
+    out = y.copy()
+    for g in np.unique(games):
+        i = np.flatnonzero(games == g)
+        out[i] = y[rng.permutation(i)]
+    return out
+
+
+def alignment_perm_p(y: np.ndarray, clusters: np.ndarray, games: np.ndarray, n_perm: int = 200,
+                     seed: int = 0) -> dict[str, float]:
+    """Permutation p-values for ARI / NMI / purity of fixed clusters against labels.
+
+    The clusters never see labels, so there is nothing to refit: shuffle y within each
+    game n_perm times and rescore the same clusters. p = (1 + #null >= obs) / (1 + n_perm).
+    """
+    if not n_perm:
+        return {"ari_p": float("nan"), "nmi_p": float("nan"), "purity_p": float("nan")}
+    score = lambda yy: (adjusted_rand_score(yy, clusters), normalized_mutual_info_score(yy, clusters),
+                        _purity(yy, clusters))
+    obs = np.array(score(y))
+    rng = np.random.default_rng(seed)
+    null = np.array([score(permute_within(y, games, rng)) for _ in range(n_perm)])
+    p = (1 + (null >= obs - 1e-12).sum(0)) / (1 + n_perm)
+    return {"ari_p": float(p[0]), "nmi_p": float(p[1]), "purity_p": float(p[2])}
+
+
 def fit_unsupervised(pose_df: pd.DataFrame, y: np.ndarray, games: np.ndarray, classes: list[str],
                      prior: np.ndarray | None = None, n_folds: int = 5, k: int | None = None,
-                     alpha: float = 1.0) -> UnsupervisedResult:
+                     alpha: float = 1.0, n_perm: int = 200) -> UnsupervisedResult:
     X = pose_df.fillna(pose_df.median()).to_numpy()
     n, K = len(X), len(classes)
     cidx = {c: i for i, c in enumerate(classes)}
@@ -89,6 +116,7 @@ def fit_unsupervised(pose_df: pd.DataFrame, y: np.ndarray, games: np.ndarray, cl
         "silhouette": float(silhouette_score(Z, clusters)) if 1 < k_used < n else float("nan"),
         "pca_components": int(red[-1].n_components_),
         "pca_variance_explained": float(red[-1].explained_variance_ratio_.sum()),
+        **alignment_perm_p(np.asarray(y), clusters, np.asarray(games), n_perm),
     }
     comp = pd.crosstab(clusters, y, normalize="index").reindex(columns=classes).fillna(0)
     sizes = pd.Series(clusters).value_counts().sort_index()

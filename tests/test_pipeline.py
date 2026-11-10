@@ -189,3 +189,32 @@ def test_game_level_confound_fools_free_shuffle_only():
     assert m["perm_p_free"] < 0.05
     assert m["perm_p"] > 0.1
     assert m["auc_lo"] <= m["auc"] <= m["auc_hi"]
+
+
+def test_cluster_alignment_p_values_are_not_small_on_noise():
+    """Random clusters vs random labels: the p-values should spread out, not pile up below 0.05."""
+    games = np.repeat(np.arange(20), 10)
+    ps = []
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        y = rng.integers(0, 2, len(games))
+        c = rng.integers(0, 2, len(games))
+        ps.append(unsupervised.alignment_perm_p(y, c, games, n_perm=99, seed=seed)["ari_p"])
+    ps = np.array(ps)
+    assert (ps < 0.05).mean() <= 0.2
+    assert ps.mean() > 0.3
+
+
+def test_cluster_alignment_p_values_find_planted_split():
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(20), 10)
+    y = rng.integers(0, 2, len(games))
+    c = np.where(rng.random(len(y)) < 0.85, y, 1 - y)
+    p = unsupervised.alignment_perm_p(y, c, games, n_perm=99)
+    assert max(p.values()) < 0.05
+
+
+def test_unsupervised_alignment_reports_p_values(clip_models):
+    _, _, uns = clip_models
+    for k in ("ari_p", "nmi_p", "purity_p"):
+        assert 0 < uns.alignment[k] <= 1
