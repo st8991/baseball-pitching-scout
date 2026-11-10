@@ -46,7 +46,7 @@ Every notebook reads `Config(pitcher="Mason Miller", ...)` in its first cell. Se
 - **Pose:** the glove-hand wrist and MediaPipe hand points (index, pinky, thumb). From these it measures glove height, angle, spread, thumb opening, distance to the chest, and elbow flare, separately in the **set** (before leg lift) and the **windup**.
 - **Pixels:** crops around the glove, summarized with HOG plus color histograms and compressed with PCA. It also writes the mean crop per class and a difference image.
 
-Each feature set gets a game-grouped CV AUC with a game-level bootstrap 95% CI and a within-game label-permutation p-value (a free shuffle across games is reported alongside for comparison) (supervised) and a 2-cluster GMM scored with ARI/NMI/purity (unsupervised). Body features with the glove removed serve as the control.
+Each feature set gets a game-grouped CV AUC with a game-level bootstrap 95% CI and a within-game label-permutation p-value (a free shuffle across games is reported alongside for comparison) (supervised) and a 2-cluster GMM scored with ARI/NMI/purity, each with the same within-game permutation p-value (unsupervised). Body features with the glove removed serve as the control.
 
 ## Run the full report
 
