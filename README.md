@@ -18,7 +18,9 @@ Run on real data on Nov 5, 2026: 474 usable Savant clips from 2024-25 (FF 228, S
 | FF vs SL | 0.598 | 0.004 | 0.564 | 0.006 |
 | FF vs CH | 0.413 | 0.852 | 0.364 | -0.008 |
 
-**Weak evidence of a fastball-vs-slider glove tell.** Supervised, the glove beats chance and the body-only control, but AUC 0.60 is not a usable tell. Unsupervised, the glove clusters don't line up with pitch type at all (ARI ≈ 0). There is no fastball-vs-changeup signal (only 33 changeup clips). Details, the season split and caveats are at the end of `notebooks/05_mason_miller_glove_tell.ipynb`.
+**Weak evidence of a fastball-vs-slider glove tell.** Supervised, the glove beats chance and the body-only control, but AUC 0.60 is not a usable tell. Unsupervised, the glove clusters don't line up with pitch type at all (ARI ≈ 0). There is no fastball-vs-changeup signal (only 33 changeup clips). **Robustness caveat:** the strongest glove differences come from MediaPipe's glove-hand finger points (spread, thumb opening, tilt), which are mostly guesses when the hand is inside a glove. With those dropped and only wrist and elbow features kept, FF vs SL falls to AUC 0.576 (p 0.024), barely above the body-only control (0.564), and FF vs SL+CH to 0.550 (p 0.056). So the evidence that the *glove itself* gives the pitch away is weaker still. Filtering finger points by visibility is the natural next step.
+
+Details, the season split and caveats are at the end of `notebooks/05_mason_miller_glove_tell.ipynb`.
 
 ## Notebooks
 
