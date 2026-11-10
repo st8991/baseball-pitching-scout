@@ -161,3 +161,31 @@ def test_glove_crops_from_video(tmp_path):
     vw.release()
     c = glove.glove_crops(clip, tr, "R")
     assert c.shape == (6, glove.CROP, glove.CROP, 3)
+
+
+def test_within_game_permutation_keeps_each_games_labels():
+    from pitchscout import glove
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(10), 12)
+    yb = rng.integers(0, 2, len(games))
+    yp = glove._permute_within(yb, games, rng)
+    for g in np.unique(games):
+        assert sorted(yp[games == g]) == sorted(yb[games == g])
+
+
+def test_game_level_confound_fools_free_shuffle_only():
+    """Each game has its own fastball rate and its own camera offset, and the offset tracks the
+    rate. Nothing separates pitches inside a game, so a real tell test must say no."""
+    from pitchscout import glove
+    rng = np.random.default_rng(0)
+    n_games, per_game = 40, 10
+    games = np.repeat(np.arange(n_games), per_game)
+    rate = np.where(np.arange(n_games) % 2 == 0, 0.15, 0.85)
+    yb = (rng.random(len(games)) < rate[games]).astype(int)
+    cam = rate[games] + rng.normal(0, 0.05, n_games)[games]
+    X = pd.DataFrame({"cam_x": cam, "noise": rng.normal(size=len(games))})
+    m = glove.test_feature_set(X, yb, games, n_perm=60, n_boot=300)
+    assert m["auc"] > 0.7
+    assert m["perm_p_free"] < 0.05
+    assert m["perm_p"] > 0.1
+    assert m["auc_lo"] <= m["auc"] <= m["auc_hi"]
