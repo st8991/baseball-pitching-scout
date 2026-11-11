@@ -191,6 +191,25 @@ def _bootstrap_auc_ci(yb: np.ndarray, p: np.ndarray, games: np.ndarray, n_boot: 
     return float(lo), float(hi)
 
 
+def _paired_auc_diff(yb: np.ndarray, p_a: np.ndarray, p_b: np.ndarray, games: np.ndarray,
+                     n_boot: int = 1000, seed: int = 0) -> tuple[float, float, float]:
+    """AUC(p_a) - AUC(p_b) on the same pitches, with a 2.5-97.5% interval from resampling
+    whole games and recomputing both AUCs on each resample (a paired comparison)."""
+    diff = float(roc_auc_score(yb, p_a) - roc_auc_score(yb, p_b))
+    uniq = np.unique(games)
+    rows = [np.flatnonzero(games == g) for g in uniq]
+    rng = np.random.default_rng(seed)
+    d = []
+    for _ in range(n_boot):
+        i = np.concatenate([rows[j] for j in rng.integers(0, len(uniq), len(uniq))])
+        if len(np.unique(yb[i])) == 2:
+            d.append(roc_auc_score(yb[i], p_a[i]) - roc_auc_score(yb[i], p_b[i]))
+    if not d:
+        return diff, float("nan"), float("nan")
+    lo, hi = np.quantile(d, [0.025, 0.975])
+    return diff, float(lo), float(hi)
+
+
 def _perm_null(Xv, yb, fold, perms, seed) -> np.ndarray:
     from joblib import Parallel, delayed
     return np.array(Parallel(n_jobs=-1)(
@@ -198,9 +217,11 @@ def _perm_null(Xv, yb, fold, perms, seed) -> np.ndarray:
 
 
 def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm: int = 200,
-                     seed: int = 0, free_shuffle: bool = True, n_boot: int = 1000) -> dict:
+                     seed: int = 0, free_shuffle: bool = True, n_boot: int = 1000,
+                     return_proba: bool = False):
     """perm_p is the within-game permutation p-value (shuffle labels inside each game_pk).
-    perm_p_free is the old free shuffle across all pitches; set free_shuffle=False to skip it."""
+    perm_p_free is the old free shuffle across all pitches; set free_shuffle=False to skip it.
+    With return_proba=True, returns (metrics, out-of-fold probabilities)."""
     Xv = X.fillna(X.median()).to_numpy()
     fold = _folds(games)
     p = _cv_proba(Xv, yb, fold, seed)
@@ -219,7 +240,7 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
     c = GaussianMixture(2, covariance_type="full", random_state=0, n_init=5).fit_predict(Z)
     # Same within-game null for the label-free clusters, so both halves carry a p-value.
     cl_p = alignment_perm_p(yb, c, games, n_perm, seed)
-    return {
+    out = {
         "auc": auc, "auc_lo": auc_lo, "auc_hi": auc_hi,
         "accuracy": acc, "majority": float(max(yb.mean(), 1 - yb.mean())),
         "perm_p": pv(null), "perm_p_free": pv(null_free) if len(null_free) else float("nan"),
@@ -227,6 +248,7 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
         "ari": float(adjusted_rand_score(yb, c)), "nmi": float(normalized_mutual_info_score(yb, c)),
         "purity": _purity(yb, c), **cl_p, "n_features": int(X.shape[1]),
     }
+    return (out, p) if return_proba else out
 
 
 def run_tell_test(glove_pose: pd.DataFrame, glove_pix: pd.DataFrame | None, body: pd.DataFrame,
@@ -256,9 +278,19 @@ def run_tell_test(glove_pose: pd.DataFrame, glove_pix: pd.DataFrame | None, body
                 StandardScaler().fit_transform(gx.to_numpy()))
             sets["Glove (pixels)"] = pd.DataFrame(Zp, index=gx.index,
                                                   columns=[f"glovepix_pc{j}||" for j in range(Zp.shape[1])])
+    proba = {}
     for name, X in sets.items():
         m = np.isin(gp.index, X.index)
-        res.sets[name] = test_feature_set(X, yb[m], games[m], n_perm)
+        res.sets[name], proba[name] = test_feature_set(X, yb[m], games[m], n_perm, return_proba=True)
+    # Paired glove - body AUC difference on the same pitches. Glove pose and the control share
+    # rows and folds; the pixel set uses the control's out-of-fold predictions on its own rows.
+    ctrl = "Body without glove (control)"
+    for name, X in sets.items():
+        if name == ctrl or not name.startswith("Glove"):
+            continue
+        m = np.isin(gp.index, X.index)
+        d, lo, hi = _paired_auc_diff(yb[m], proba[name], proba[ctrl][m], games[m])
+        res.sets[name].update(auc_diff=d, auc_diff_lo=lo, auc_diff_hi=hi)
     for ph in ("set", "windup"):
         cols = [c for c in gp.columns if f"|{ph}|" in c]
         if cols:
@@ -287,15 +319,19 @@ def verdict(res: TellResult) -> str:
     if not best:
         return "Not enough clips to test."
     sig = best["perm_p"] < 0.01 and best["auc"] >= 0.60
-    beats = best["auc"] > c.get("auc", 0) + 0.03
+    # "Better than the body" only when the paired interval for glove - body excludes zero.
+    lo = best.get("auc_diff_lo", float("nan"))
+    beats = lo > 0 if np.isfinite(lo) else best["auc"] > c.get("auc", 0) + 0.03
+    gap = (f", AUC difference {best['auc_diff']:+.2f}, 95% CI {lo:+.2f} to {best['auc_diff_hi']:+.2f}"
+           if np.isfinite(lo) else "")
     if sig and beats:
         return (f"Supported: the glove alone separates {res.positive_label} from {res.negative_label} "
                 f"(AUC {best['auc']:.2f}, 95% CI {best.get('auc_lo', float('nan')):.2f}-{best.get('auc_hi', float('nan')):.2f}, "
                 f"within-game permutation p={best['perm_p']:.3f}), better than the body-only "
-                f"control (AUC {c.get('auc', float('nan')):.2f}).")
+                f"control (AUC {c.get('auc', float('nan')):.2f}{gap}).")
     if sig:
         return (f"Partly supported: the glove carries signal (AUC {best['auc']:.2f}, p={best['perm_p']:.3f}), "
-                f"but the body-only control does about as well (AUC {c.get('auc', float('nan')):.2f}), "
+                f"but it is not distinguishable from the body-only control (AUC {c.get('auc', float('nan')):.2f}{gap}), "
                 "so the tell may be the whole delivery, not just the glove.")
     if best["perm_p"] < 0.05 and best["auc"] >= 0.55:
         return (f"Weak evidence: glove-only AUC {best['auc']:.2f} (p={best['perm_p']:.3f}) beats chance, "

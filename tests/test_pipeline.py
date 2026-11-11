@@ -142,6 +142,8 @@ def test_glove_tell_detects_planted_glove_signal(df, clip_models, tmp_path):
     g = res.sets["Glove (pose)"]
     assert g["auc"] > 0.8 and g["perm_p"] < 0.01
     assert res.sets["Glove (pose)"]["auc"] > res.sets["Body without glove (control)"]["auc"]
+    assert g["auc_diff_lo"] > 0 and g["auc_diff_lo"] <= g["auc_diff"] <= g["auc_diff_hi"]
+    assert "auc_diff" not in res.sets["Body without glove (control)"]
     assert res.verdict.startswith("Supported")
     assert glove.crop_panel(res, tmp_path / "p.png").exists()
     out = build(tmp_path / "r.html", "Test Pitcher", "R", "2024-04-01", "2024-09-01", df,
@@ -218,3 +220,24 @@ def test_unsupervised_alignment_reports_p_values(clip_models):
     _, _, uns = clip_models
     for k in ("ari_p", "nmi_p", "purity_p"):
         assert 0 < uns.alignment[k] <= 1
+
+
+def test_paired_auc_diff_is_zero_for_identical_models():
+    from pitchscout import glove
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(30), 8)
+    yb = rng.integers(0, 2, len(games))
+    p = np.clip(0.5 + 0.2 * (yb - 0.5) + rng.normal(0, 0.2, len(yb)), 0, 1)
+    d, lo, hi = glove._paired_auc_diff(yb, p, p.copy(), games, n_boot=200)
+    assert d == 0 and lo <= 0 <= hi
+
+
+def test_verdict_needs_paired_interval_above_zero():
+    from pitchscout import glove
+    res = glove.TellResult("FF", "SL", 400, 200)
+    base = {"auc": 0.62, "auc_lo": 0.56, "auc_hi": 0.68, "perm_p": 0.005}
+    res.sets["Body without glove (control)"] = {"auc": 0.55}
+    res.sets["Glove (pose)"] = {**base, "auc_diff": 0.07, "auc_diff_lo": -0.01, "auc_diff_hi": 0.15}
+    assert glove.verdict(res).startswith("Partly")
+    res.sets["Glove (pose)"].update(auc_diff_lo=0.01)
+    assert glove.verdict(res).startswith("Supported")
