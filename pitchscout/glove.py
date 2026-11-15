@@ -210,6 +210,27 @@ def _paired_auc_diff(yb: np.ndarray, p_a: np.ndarray, p_b: np.ndarray, games: np
     return diff, float(lo), float(hi)
 
 
+def ari_ceiling(auc: float, pos_rate: float, n: int, n_draws: int = 200, seed: int = 0) -> float:
+    """Expected ARI of the best possible 2-way split for a signal of this AUC.
+
+    Two unit-variance Gaussians separated by d' = sqrt(2) * Phi^-1(AUC) (the separation at
+    which the optimal classifier reaches that AUC), class balance pos_rate, n points, split
+    at the midpoint along the signal direction. Averaged over n_draws simulations.
+    See docs/research/2026-11-08-why-clustering-misses-a-weak-tell.md.
+    """
+    from scipy.stats import norm
+    if not np.isfinite(auc) or n < 2:
+        return float("nan")
+    d = np.sqrt(2) * norm.ppf(np.clip(auc, 0.5, 1 - 1e-9))
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n_draws):
+        y = (rng.random(n) < pos_rate).astype(int)
+        s = rng.normal(size=n) + d * y
+        out.append(adjusted_rand_score(y, (s > d / 2).astype(int)))
+    return float(np.mean(out))
+
+
 def _perm_null(Xv, yb, fold, perms, seed) -> np.ndarray:
     from joblib import Parallel, delayed
     return np.array(Parallel(n_jobs=-1)(
@@ -238,6 +259,12 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
     Z = StandardScaler().fit_transform(Xv)
     Z = PCA(min(8, Z.shape[1], len(Z) - 1), random_state=0).fit_transform(Z)
     c = GaussianMixture(2, covariance_type="full", random_state=0, n_init=5).fit_predict(Z)
+    # Score the supervised partition with the same metrics, plus the best ARI any 2-way
+    # split could reach at this AUC, so AUC and ARI can be read on one scale.
+    sup = (p > 0.5).astype(int)
+    sup_metrics = {"sup_ari": float(adjusted_rand_score(yb, sup)),
+                   "sup_nmi": float(normalized_mutual_info_score(yb, sup)),
+                   "ari_ceiling": ari_ceiling(auc, float(yb.mean()), len(yb), seed=seed)}
     # Same within-game null for the label-free clusters, so both halves carry a p-value.
     cl_p = alignment_perm_p(yb, c, games, n_perm, seed)
     out = {
@@ -246,7 +273,7 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
         "perm_p": pv(null), "perm_p_free": pv(null_free) if len(null_free) else float("nan"),
         "null_auc_95": float(np.quantile(null, 0.95)) if len(null) else float("nan"),
         "ari": float(adjusted_rand_score(yb, c)), "nmi": float(normalized_mutual_info_score(yb, c)),
-        "purity": _purity(yb, c), **cl_p, "n_features": int(X.shape[1]),
+        "purity": _purity(yb, c), **cl_p, **sup_metrics, "n_features": int(X.shape[1]),
     }
     return (out, p) if return_proba else out
 

@@ -241,3 +241,25 @@ def test_verdict_needs_paired_interval_above_zero():
     assert glove.verdict(res).startswith("Partly")
     res.sets["Glove (pose)"].update(auc_diff_lo=0.01)
     assert glove.verdict(res).startswith("Supported")
+
+
+def test_ari_ceiling_rises_with_auc():
+    from pitchscout import glove
+    c = [glove.ari_ceiling(a, 0.5, 474, n_draws=100) for a in (0.5, 0.6, 0.75, 0.9)]
+    assert abs(c[0]) < 0.01
+    assert c[0] < c[1] < c[2] < c[3]
+    assert 0.005 < c[1] < 0.05  # matches the research note: ~0.02 at AUC 0.60
+
+
+def test_supervised_ari_beats_gmm_on_strong_signal():
+    """Signal in one column, louder noise in the rest: the supervised split finds the labels,
+    the label-free GMM follows the noise."""
+    from pitchscout import glove
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(30), 10)
+    yb = rng.integers(0, 2, len(games))
+    X = pd.DataFrame(rng.normal(0, 3, (len(yb), 6)), columns=[f"n{i}" for i in range(6)])
+    X["signal"] = yb * 2.0 + rng.normal(size=len(yb))
+    m = glove.test_feature_set(X, yb, games, n_perm=0, n_boot=0)
+    assert m["sup_ari"] > m["ari"] + 0.2
+    assert 0 < m["ari_ceiling"] <= 1
