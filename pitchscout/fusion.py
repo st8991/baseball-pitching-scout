@@ -1,7 +1,7 @@
 """Fuse the stats prior with pose features and explain what the vision layer uses."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import lightgbm as lgb
 import numpy as np
@@ -75,6 +75,22 @@ class FusionResult:
     prior: np.ndarray            # stats-only probabilities for the same pitches
     y: np.ndarray
     index: np.ndarray            # row index into the pitch dataframe
+    per_pitch: dict = field(default_factory=dict)  # model -> {"log_loss": (n,), "correct": (n,)}
+
+
+def paired_game_bootstrap(a: np.ndarray, b: np.ndarray, games: np.ndarray, n_boot: int = 2000,
+                          seed: int = 0) -> tuple[float, float, float]:
+    """mean(a - b) for per-pitch scores of two models on the same pitches, with a 2.5-97.5%
+    interval from resampling whole games (errors are correlated within a game)."""
+    d = np.asarray(a, float) - np.asarray(b, float)
+    uniq, inv = np.unique(games, return_inverse=True)
+    sums = np.bincount(inv, weights=d, minlength=len(uniq))
+    counts = np.bincount(inv, minlength=len(uniq))
+    rng = np.random.default_rng(seed)
+    pick = rng.integers(0, len(uniq), (n_boot, len(uniq)))
+    boot = sums[pick].sum(1) / counts[pick].sum(1)
+    lo, hi = np.quantile(boot, [0.025, 0.975])
+    return float(d.mean()), float(lo), float(hi)
 
 
 def _model(seed=0):
@@ -119,16 +135,28 @@ def fit_fusion(pose_df: pd.DataFrame, prior: np.ndarray, y: np.ndarray, games: n
         return {"log_loss": float(log_loss(y, p, labels=classes)),
                 "accuracy": float(accuracy_score(y, np.asarray(classes)[p.argmax(1)]))}
 
+    yi = np.array([classes.index(c) for c in y])
+    per_pitch = {name: {"log_loss": -np.log(np.clip(p[np.arange(n), yi], 1e-15, 1)),
+                        "correct": (p.argmax(1) == yi).astype(float)}
+                 for name, p in (("stats_only", prior), ("vision_only", vis), ("stats_plus_vision", fused))}
+    # Paired, game-resampled test of the vision gain: positive delta_logloss means stats +
+    # vision has lower log loss than stats alone; positive delta_accuracy means more correct.
+    s_, f_ = per_pitch["stats_only"], per_pitch["stats_plus_vision"]
+    dl, dl_lo, dl_hi = paired_game_bootstrap(s_["log_loss"], f_["log_loss"], games)
+    da, da_lo, da_hi = paired_game_bootstrap(f_["correct"], s_["correct"], games)
+    gain = {"delta_logloss": dl, "delta_logloss_lo": dl_lo, "delta_logloss_hi": dl_hi,
+            "delta_accuracy": da, "delta_accuracy_lo": da_lo, "delta_accuracy_hi": da_hi}
+
     mix = pd.Series(y).value_counts(normalize=True).reindex(classes).fillna(1e-6).to_numpy()
     metrics = {
         "naive_mix": met(np.tile(mix, (n, 1))),
         "stats_only": met(prior),
         "vision_only": met(vis),
-        "stats_plus_vision": met(fused),
+        "stats_plus_vision": {**met(fused), **gain},
         "n_clips": int(n), "n_games": int(len(uniq)),
     }
     return FusionResult(classes, metrics, contrib, list(X.columns), fused, prior, y,
-                        pose_df.index.to_numpy())
+                        pose_df.index.to_numpy(), per_pitch)
 
 
 def attention_grid(res: FusionResult, mask: np.ndarray | None = None, cls: int | None = None,
