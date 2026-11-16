@@ -263,3 +263,29 @@ def test_supervised_ari_beats_gmm_on_strong_signal():
     m = glove.test_feature_set(X, yb, games, n_perm=0, n_boot=0)
     assert m["sup_ari"] > m["ari"] + 0.2
     assert 0 < m["ari_ceiling"] <= 1
+
+
+def test_paired_game_bootstrap_is_zero_when_models_match():
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(25), 8)
+    loss = rng.exponential(1.0, len(games))
+    d, lo, hi = fusion.paired_game_bootstrap(loss, loss.copy(), games, n_boot=500)
+    assert d == 0 and lo <= 0 <= hi
+
+
+def test_paired_game_bootstrap_detects_a_consistent_gain():
+    rng = np.random.default_rng(1)
+    games = np.repeat(np.arange(25), 8)
+    a = rng.exponential(1.0, len(games))
+    d, lo, hi = fusion.paired_game_bootstrap(a, a - 0.1, games, n_boot=500)
+    assert abs(d - 0.1) < 1e-9 and lo > 0
+
+
+def test_fusion_reports_paired_vision_gain(clip_models):
+    _, fus, _ = clip_models
+    g = fus.metrics["stats_plus_vision"]
+    assert g["delta_logloss_lo"] <= g["delta_logloss"] <= g["delta_logloss_hi"]
+    assert g["delta_accuracy_lo"] <= g["delta_accuracy"] <= g["delta_accuracy_hi"]
+    s, f = fus.per_pitch["stats_only"], fus.per_pitch["stats_plus_vision"]
+    assert np.isclose(g["delta_logloss"], s["log_loss"].mean() - f["log_loss"].mean())
+    assert np.isclose(f["log_loss"].mean(), g["log_loss"], atol=1e-6)
