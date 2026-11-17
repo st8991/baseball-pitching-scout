@@ -228,8 +228,8 @@ def test_paired_auc_diff_is_zero_for_identical_models():
     games = np.repeat(np.arange(30), 8)
     yb = rng.integers(0, 2, len(games))
     p = np.clip(0.5 + 0.2 * (yb - 0.5) + rng.normal(0, 0.2, len(yb)), 0, 1)
-    d, lo, hi = glove._paired_auc_diff(yb, p, p.copy(), games, n_boot=200)
-    assert d == 0 and lo <= 0 <= hi
+    d, lo, hi, r = glove._paired_auc_diff(yb, p, p.copy(), games, n_boot=200)
+    assert d == 0 and lo <= 0 <= hi and r > 0.99
 
 
 def test_verdict_needs_paired_interval_above_zero():
@@ -289,3 +289,29 @@ def test_fusion_reports_paired_vision_gain(clip_models):
     s, f = fus.per_pitch["stats_only"], fus.per_pitch["stats_plus_vision"]
     assert np.isclose(g["delta_logloss"], s["log_loss"].mean() - f["log_loss"].mean())
     assert np.isclose(f["log_loss"].mean(), g["log_loss"], atol=1e-6)
+
+
+def test_hanley_mcneil_se_matches_note_and_shrinks():
+    from pitchscout import glove
+    se = glove.hanley_mcneil_se(0.58, 220, 221)
+    assert abs(se - 0.027) < 0.001
+    assert glove.hanley_mcneil_se(0.58, 500, 500) < se < glove.hanley_mcneil_se(0.58, 100, 100)
+
+
+def test_min_detectable_gap_shrinks_with_n_and_correlation():
+    from pitchscout import glove
+    base = glove.min_detectable_auc_diff(0.576, 0.564, 220, 221, r=0.3)
+    assert glove.min_detectable_auc_diff(0.576, 0.564, 950, 950, r=0.3) < base
+    assert glove.min_detectable_auc_diff(0.576, 0.564, 220, 221, r=0.6) < base
+    assert base > 0.012  # the observed wrist-only gap is far below what 441 clips can detect
+
+
+def test_verdict_flags_underpowered_comparison():
+    from pitchscout import glove
+    res = glove.TellResult("FF", "SL", 441, 220)
+    res.sets["Body without glove (control)"] = {"auc": 0.564}
+    res.sets["Glove (pose)"] = {"auc": 0.62, "auc_lo": 0.56, "auc_hi": 0.68, "perm_p": 0.005,
+                                "auc_diff": 0.03, "auc_diff_lo": -0.02, "auc_diff_hi": 0.08,
+                                "auc_diff_mdd": 0.07}
+    v = glove.verdict(res)
+    assert v.startswith("Partly") and "underpowered" in v
