@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 
 from .pose import JOINTS, PoseTrack, normalize, resample
@@ -101,6 +102,40 @@ def _model(seed=0):
     )
 
 
+def _offset_model(seed=0):
+    # Fewer trees than _model: the trees only fit a residual on top of the stats prior.
+    return lgb.LGBMClassifier(
+        n_estimators=60, learning_rate=0.03, num_leaves=7, min_child_samples=15,
+        subsample=0.8, subsample_freq=1, colsample_bytree=0.5, reg_lambda=3.0,
+        random_state=seed, verbose=-1,
+    )
+
+
+def _softmax(z: np.ndarray) -> np.ndarray:
+    z = z - z.max(1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(1, keepdims=True)
+
+
+def _inner_oof_vision(Xp: pd.DataFrame, y: np.ndarray, games: np.ndarray, labels: np.ndarray,
+                      n_inner: int = 3, seed: int = 0) -> np.ndarray:
+    """Out-of-fold vision-only probabilities inside a training fold (game-grouped), columns in
+    the order of `labels`. Used to train the stacker without leaking the vision fit."""
+    uniq = np.unique(games)
+    rng = np.random.default_rng(seed + 100)
+    inner = pd.Series(rng.integers(0, n_inner, len(uniq)), index=uniq).loc[games].to_numpy()
+    out = np.full((len(y), len(labels)), 1.0 / len(labels))
+    for j in range(n_inner):
+        tr, te = inner != j, inner == j
+        if te.sum() == 0 or len(np.unique(y[tr])) < 2:
+            continue
+        m = _model(seed).fit(Xp[tr], y[tr])
+        idx = [int(np.flatnonzero(labels == c)[0]) for c in m.classes_]
+        out[np.ix_(te, idx)] = m.predict_proba(Xp[te])
+    out = np.clip(out, 1e-6, 1)
+    return out / out.sum(1, keepdims=True)
+
+
 def fit_fusion(pose_df: pd.DataFrame, prior: np.ndarray, y: np.ndarray, games: np.ndarray,
                classes: list[str], n_folds: int = 5) -> FusionResult:
     """pose_df: one row per clip (pose features). prior: stats-model probs for the same
@@ -114,8 +149,11 @@ def fit_fusion(pose_df: pd.DataFrame, prior: np.ndarray, y: np.ndarray, games: n
     rng = np.random.default_rng(1)
     fold = pd.Series(rng.integers(0, n_folds, len(uniq)), index=uniq).loc[games].to_numpy()
 
+    logp = np.log(np.clip(prior, 1e-6, 1))
     fused = np.zeros((n, K))
     vis = np.zeros((n, K))
+    offset = np.zeros((n, K))
+    stacked = np.zeros((n, K))
     contrib = np.zeros((n, X.shape[1], K))
     for k in range(n_folds):
         tr, te = fold != k, fold == k
@@ -128,8 +166,31 @@ def fit_fusion(pose_df: pd.DataFrame, prior: np.ndarray, y: np.ndarray, games: n
         contrib[np.ix_(te, np.arange(X.shape[1]), cols)] = c[:, :, :-1].transpose(0, 2, 1)
         mv = _model(k).fit(pose_only[tr], y[tr])
         vis[np.ix_(te, cols)] = mv.predict_proba(pose_only[te])
+        # Offset: trees fit a residual on top of log(prior); predict() does not add it back.
+        lp_tr, lp_te = logp[np.ix_(tr, cols)], logp[np.ix_(te, cols)]
+        if len(cols) == 2:  # binary LightGBM uses one raw score: log-odds of the second class
+            mo = _offset_model(k).fit(pose_only[tr], y[tr], init_score=lp_tr[:, 1] - lp_tr[:, 0])
+            raw = mo.predict(pose_only[te], raw_score=True) + lp_te[:, 1] - lp_te[:, 0]
+            offset[np.ix_(te, cols)] = _softmax(np.c_[np.zeros_like(raw), raw])
+        else:
+            mo = _offset_model(k).fit(pose_only[tr], y[tr], init_score=lp_tr)
+            raw = mo.predict(pose_only[te], raw_score=True).reshape(te.sum(), len(cols))
+            offset[np.ix_(te, cols)] = _softmax(raw + lp_te)
+        # Stacked: logistic regression on [log prior, log vision], with the vision column
+        # from nested out-of-fold predictions on the training games.
+        labels = np.asarray(classes)[cols]
+        v_tr = _inner_oof_vision(pose_only[tr], y[tr], games[tr], labels, seed=k)
+        v_te = np.clip(mv.predict_proba(pose_only[te]), 1e-6, 1)
+        Z_tr = np.hstack([logp[np.ix_(tr, cols)], np.log(v_tr)])
+        Z_te = np.hstack([logp[np.ix_(te, cols)], np.log(v_te)])
+        lr = LogisticRegression(C=1.0, max_iter=2000).fit(Z_tr, y[tr])
+        idx = [cols[list(labels).index(c)] for c in lr.classes_]
+        stacked[np.ix_(te, idx)] = lr.predict_proba(Z_te)
     fused = np.clip(fused, 1e-6, 1); fused /= fused.sum(1, keepdims=True)
     vis = np.clip(vis, 1e-6, 1); vis /= vis.sum(1, keepdims=True)
+    for a in (offset, stacked):
+        a[a.sum(1) == 0] = prior[a.sum(1) == 0]  # folds skipped above fall back to the prior
+        np.clip(a, 1e-6, 1, out=a); a /= a.sum(1, keepdims=True)
 
     def met(p):
         return {"log_loss": float(log_loss(y, p, labels=classes)),
@@ -138,21 +199,26 @@ def fit_fusion(pose_df: pd.DataFrame, prior: np.ndarray, y: np.ndarray, games: n
     yi = np.array([classes.index(c) for c in y])
     per_pitch = {name: {"log_loss": -np.log(np.clip(p[np.arange(n), yi], 1e-15, 1)),
                         "correct": (p.argmax(1) == yi).astype(float)}
-                 for name, p in (("stats_only", prior), ("vision_only", vis), ("stats_plus_vision", fused))}
-    # Paired, game-resampled test of the vision gain: positive delta_logloss means stats +
-    # vision has lower log loss than stats alone; positive delta_accuracy means more correct.
-    s_, f_ = per_pitch["stats_only"], per_pitch["stats_plus_vision"]
-    dl, dl_lo, dl_hi = paired_game_bootstrap(s_["log_loss"], f_["log_loss"], games)
-    da, da_lo, da_hi = paired_game_bootstrap(f_["correct"], s_["correct"], games)
-    gain = {"delta_logloss": dl, "delta_logloss_lo": dl_lo, "delta_logloss_hi": dl_hi,
-            "delta_accuracy": da, "delta_accuracy_lo": da_lo, "delta_accuracy_hi": da_hi}
+                 for name, p in (("stats_only", prior), ("vision_only", vis), ("stats_plus_vision", fused),
+                                 ("stats_offset_vision", offset), ("stats_stacked_vision", stacked))}
+
+    def gain(name):
+        # Paired, game-resampled test of the vision gain: positive delta_logloss means this model
+        # has lower log loss than stats alone; positive delta_accuracy means more correct.
+        s_, f_ = per_pitch["stats_only"], per_pitch[name]
+        dl, dl_lo, dl_hi = paired_game_bootstrap(s_["log_loss"], f_["log_loss"], games)
+        da, da_lo, da_hi = paired_game_bootstrap(f_["correct"], s_["correct"], games)
+        return {"delta_logloss": dl, "delta_logloss_lo": dl_lo, "delta_logloss_hi": dl_hi,
+                "delta_accuracy": da, "delta_accuracy_lo": da_lo, "delta_accuracy_hi": da_hi}
 
     mix = pd.Series(y).value_counts(normalize=True).reindex(classes).fillna(1e-6).to_numpy()
     metrics = {
         "naive_mix": met(np.tile(mix, (n, 1))),
         "stats_only": met(prior),
         "vision_only": met(vis),
-        "stats_plus_vision": {**met(fused), **gain},
+        "stats_plus_vision": {**met(fused), **gain("stats_plus_vision")},
+        "stats_offset_vision": {**met(offset), **gain("stats_offset_vision")},
+        "stats_stacked_vision": {**met(stacked), **gain("stats_stacked_vision")},
         "n_clips": int(n), "n_games": int(len(uniq)),
     }
     return FusionResult(classes, metrics, contrib, list(X.columns), fused, prior, y,

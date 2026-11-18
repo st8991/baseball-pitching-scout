@@ -315,3 +315,27 @@ def test_verdict_flags_underpowered_comparison():
                                 "auc_diff_mdd": 0.07}
     v = glove.verdict(res)
     assert v.startswith("Partly") and "underpowered" in v
+
+
+def _noise_fusion_inputs(seed=0, n_games=60, per_game=8, K=3):
+    rng = np.random.default_rng(seed)
+    classes = sorted(["FF", "SL", "CH"][:K])  # the pipeline always passes sorted classes
+    n = n_games * per_game
+    games = np.repeat(np.arange(n_games), per_game)
+    prior = rng.dirichlet(np.ones(K) * 2, n)
+    y = np.array([rng.choice(classes, p=p) for p in prior])  # prior is calibrated by construction
+    pose = pd.DataFrame(rng.normal(size=(n, 30)), columns=[f"l_wrist|x|{i}" for i in range(30)])
+    return pose, prior, y, games, classes
+
+
+def test_offset_fusion_stays_near_prior_with_noise_vision():
+    pose, prior, y, games, classes = _noise_fusion_inputs()
+    fus = fusion.fit_fusion(pose, prior, y, games, classes)
+    m = fus.metrics
+    assert m["stats_offset_vision"]["log_loss"] < m["stats_only"]["log_loss"] + 0.03
+    assert m["stats_stacked_vision"]["log_loss"] < m["stats_only"]["log_loss"] + 0.05
+    for k in ("stats_offset_vision", "stats_stacked_vision"):
+        g = m[k]
+        assert g["delta_logloss_lo"] <= g["delta_logloss"] <= g["delta_logloss_hi"]
+        assert np.allclose(fus.per_pitch[k]["log_loss"].mean(), g["log_loss"], atol=1e-5)
+
