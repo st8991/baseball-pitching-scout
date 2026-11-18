@@ -176,6 +176,8 @@ def clip_rows(fus, uns) -> list[dict]:
             ("Stats only (out-of-fold)", "supervised", fus.metrics["stats_only"]),
             ("Vision only (LightGBM on pose)", "supervised", fus.metrics["vision_only"]),
             ("Stats + vision (LightGBM)", "supervised", fus.metrics["stats_plus_vision"]),
+            ("Stats + vision (prior as offset)", "supervised", fus.metrics["stats_offset_vision"]),
+            ("Stats + vision (stacked)", "supervised", fus.metrics["stats_stacked_vision"]),
             ("Clusters only (PCA + GMM)", "unsupervised", uns.metrics["clusters_only"]),
             ("Stats + clusters", "unsupervised", uns.metrics["stats_plus_clusters"])]
     return [{"dataset": "Clips", "model": name, "family": fam, "evaluation": "game-grouped CV", **r}
