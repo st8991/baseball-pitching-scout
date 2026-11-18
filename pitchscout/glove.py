@@ -192,22 +192,46 @@ def _bootstrap_auc_ci(yb: np.ndarray, p: np.ndarray, games: np.ndarray, n_boot: 
 
 
 def _paired_auc_diff(yb: np.ndarray, p_a: np.ndarray, p_b: np.ndarray, games: np.ndarray,
-                     n_boot: int = 1000, seed: int = 0) -> tuple[float, float, float]:
+                     n_boot: int = 1000, seed: int = 0) -> tuple[float, float, float, float]:
     """AUC(p_a) - AUC(p_b) on the same pitches, with a 2.5-97.5% interval from resampling
-    whole games and recomputing both AUCs on each resample (a paired comparison)."""
+    whole games and recomputing both AUCs on each resample (a paired comparison).
+    Also returns r, the correlation between the two AUC estimates across resamples."""
     diff = float(roc_auc_score(yb, p_a) - roc_auc_score(yb, p_b))
     uniq = np.unique(games)
     rows = [np.flatnonzero(games == g) for g in uniq]
     rng = np.random.default_rng(seed)
-    d = []
+    a, b = [], []
     for _ in range(n_boot):
         i = np.concatenate([rows[j] for j in rng.integers(0, len(uniq), len(uniq))])
         if len(np.unique(yb[i])) == 2:
-            d.append(roc_auc_score(yb[i], p_a[i]) - roc_auc_score(yb[i], p_b[i]))
-    if not d:
-        return diff, float("nan"), float("nan")
+            a.append(roc_auc_score(yb[i], p_a[i])); b.append(roc_auc_score(yb[i], p_b[i]))
+    if len(a) < 3:
+        return diff, float("nan"), float("nan"), float("nan")
+    d = np.subtract(a, b)
     lo, hi = np.quantile(d, [0.025, 0.975])
-    return diff, float(lo), float(hi)
+    r = float(np.corrcoef(a, b)[0, 1]) if np.std(a) > 0 and np.std(b) > 0 else 1.0
+    return diff, float(lo), float(hi), r
+
+
+def hanley_mcneil_se(auc: float, n_pos: int, n_neg: int) -> float:
+    """Standard error of an AUC (Hanley & McNeil 1982, exponential approximation for Q1/Q2).
+    Treats pitches as independent, so it is a best case next to the game bootstrap."""
+    q1, q2 = auc / (2 - auc), 2 * auc ** 2 / (1 + auc)
+    var = (auc * (1 - auc) + (n_pos - 1) * (q1 - auc ** 2) + (n_neg - 1) * (q2 - auc ** 2)) / (n_pos * n_neg)
+    return float(np.sqrt(max(var, 0.0)))
+
+
+def min_detectable_auc_diff(auc_a: float, auc_b: float, n_pos: int, n_neg: int, r: float,
+                            alpha: float = 0.05, power: float = 0.8) -> float:
+    """Smallest AUC gap a paired comparison of two models on the same n_pos/n_neg pitches can
+    detect (two-sided alpha, given power), with r the correlation between the two AUC
+    estimates: (z_{1-alpha/2} + z_power) * sqrt(SE_a^2 + SE_b^2 - 2 r SE_a SE_b)."""
+    from scipy.stats import norm
+    if not np.isfinite(r):
+        return float("nan")
+    sa, sb = hanley_mcneil_se(auc_a, n_pos, n_neg), hanley_mcneil_se(auc_b, n_pos, n_neg)
+    se = np.sqrt(max(sa ** 2 + sb ** 2 - 2 * r * sa * sb, 0.0))
+    return float((norm.ppf(1 - alpha / 2) + norm.ppf(power)) * se)
 
 
 def ari_ceiling(auc: float, pos_rate: float, n: int, n_draws: int = 200, seed: int = 0) -> float:
@@ -268,7 +292,7 @@ def test_feature_set(X: pd.DataFrame, yb: np.ndarray, games: np.ndarray, n_perm:
     # Same within-game null for the label-free clusters, so both halves carry a p-value.
     cl_p = alignment_perm_p(yb, c, games, n_perm, seed)
     out = {
-        "auc": auc, "auc_lo": auc_lo, "auc_hi": auc_hi,
+        "auc": auc, "auc_lo": auc_lo, "auc_hi": auc_hi, "auc_halfwidth": (auc_hi - auc_lo) / 2,
         "accuracy": acc, "majority": float(max(yb.mean(), 1 - yb.mean())),
         "perm_p": pv(null), "perm_p_free": pv(null_free) if len(null_free) else float("nan"),
         "null_auc_95": float(np.quantile(null, 0.95)) if len(null) else float("nan"),
@@ -316,8 +340,12 @@ def run_tell_test(glove_pose: pd.DataFrame, glove_pix: pd.DataFrame | None, body
         if name == ctrl or not name.startswith("Glove"):
             continue
         m = np.isin(gp.index, X.index)
-        d, lo, hi = _paired_auc_diff(yb[m], proba[name], proba[ctrl][m], games[m])
-        res.sets[name].update(auc_diff=d, auc_diff_lo=lo, auc_diff_hi=hi)
+        d, lo, hi, r = _paired_auc_diff(yb[m], proba[name], proba[ctrl][m], games[m])
+        n_pos = int(yb[m].sum())
+        mdd = min_detectable_auc_diff(res.sets[name]["auc"], roc_auc_score(yb[m], proba[ctrl][m]),
+                                      n_pos, int(m.sum()) - n_pos, r)
+        res.sets[name].update(auc_diff=d, auc_diff_lo=lo, auc_diff_hi=hi, auc_diff_r=r,
+                              auc_diff_mdd=mdd)
     for ph in ("set", "windup"):
         cols = [c for c in gp.columns if f"|{ph}|" in c]
         if cols:
@@ -357,9 +385,15 @@ def verdict(res: TellResult) -> str:
                 f"within-game permutation p={best['perm_p']:.3f}), better than the body-only "
                 f"control (AUC {c.get('auc', float('nan')):.2f}{gap}).")
     if sig:
+        mdd = best.get("auc_diff_mdd", float("nan"))
+        if np.isfinite(mdd) and mdd > abs(best.get("auc_diff", 0)):
+            why = (f"The comparison is underpowered: at this many clips only a gap of about {mdd:.2f} "
+                   "or more could be detected, so this means not distinguishable, not no difference.")
+        else:
+            why = "So the tell may be the whole delivery, not just the glove."
         return (f"Partly supported: the glove carries signal (AUC {best['auc']:.2f}, p={best['perm_p']:.3f}), "
-                f"but it is not distinguishable from the body-only control (AUC {c.get('auc', float('nan')):.2f}{gap}), "
-                "so the tell may be the whole delivery, not just the glove.")
+                f"but it is not distinguishable from the body-only control (AUC {c.get('auc', float('nan')):.2f}{gap}). "
+                + why)
     if best["perm_p"] < 0.05 and best["auc"] >= 0.55:
         return (f"Weak evidence: glove-only AUC {best['auc']:.2f} (p={best['perm_p']:.3f}) beats chance, "
                 "but not strongly enough to call it a reliable tell. More clips (or more permutations) "
